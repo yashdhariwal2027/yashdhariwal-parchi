@@ -353,3 +353,17 @@ test("seller address in another state than the GST state is flagged", async () =
   assert.match(w!.message, /Gurgaon \(Haryana\).*Delhi/);
   assert.ok(!checkDraft(ready, biz(), calcDraft(ready, biz())).some((i) => i.code === "seller_state"), "matching address: no warning");
 });
+
+test("a lookalike never overrides the AI's 'not in your products' (silk saree is not Silk scarf)", () => {
+  const withScarf: Product[] = [...products, { id: "p-scarf", name: "Silk scarf", aliases: "", price: 799, unit: "PCS", hsn: "6214", gst_rate: 5, rate_rule: "fixed", archived: false }];
+  const saree = order({ items: [{ productId: "", confidence: "none", text: "Banarasi silk saree", quantity: 1, quantityStated: true, size: "", colour: "red", details: "" }] });
+  const d = draftFromParsed(saree, MESSAGE, withScarf);
+  assert.equal(d.lines[0].productId, null);
+  assert.equal(d.lines[0].name, "Banarasi silk saree");
+  assert.equal(d.lines[0].price, 0);
+  // A near-exact spelling the AI missed is still picked up, and flagged.
+  const typo = order({ items: [{ productId: "", confidence: "none", text: "dupata", quantity: 1, quantityStated: true, size: "", colour: "", details: "" }] });
+  const d2 = draftFromParsed(typo, MESSAGE, withScarf);
+  assert.equal(d2.lines[0].productId, "p-dupatta");
+  assert.ok(d2.lines[0].checks.some((c) => c.field === "product"));
+});

@@ -18,7 +18,22 @@ export const DEFAULT_MODEL = "gemini-3.8-flash";
 export const MAX_MESSAGE_CHARS = 4000;
 export const MAX_CATALOGUE_ITEMS = 400;
 const MAX_BODY_BYTES = 120_000;
-const GEMINI_TIMEOUT_MS = 30_000;
+/** Longest wait for one Gemini call, and for all tries together (Vercel stops the function at 60 s, the app at 60 s). */
+const GEMINI_TIMEOUT_MS = 45_000;
+const TOTAL_BUDGET_MS = 54_000;
+
+/**
+ * Reading an order is simple extraction, so Gemini is asked to "think" briefly. Its default (medium) can take
+ * well over 30 seconds on a long message. Google's docs: Gemini 3.8 Flash accepts low, medium and high.
+ */
+export const THINKING = { thinkingLevel: "low" } as const;
+
+/** The request format that last worked, so a warm server doesn't repeat formats Gemini has already refused. */
+let preferredFormat = 0;
+/** For tests. */
+export function resetFormatMemory() {
+  preferredFormat = 0;
+}
 
 export type PaymentMode = "cod" | "upi" | "prepaid" | "bank" | "cash" | "unknown";
 export type MatchConfidence = "high" | "medium" | "low" | "none";
@@ -63,6 +78,7 @@ export type ParseErrorCode =
   | "quota_exceeded"
   | "not_configured"
   | "ai_busy"
+  | "ai_limit"
   | "ai_failed"
   | "timeout";
 
@@ -110,6 +126,7 @@ Rules:
 - text: the product as the customer named it, without the colour, size or quantity ("tshirt", not "black tshirt XL").
 - size and colour: as written ("M", "XL", "32", "blue").
 - other_details: only further attributes of the product itself, such as fabric, flavour, weight, pack size or text to engrave. Never who it is for ("for my sister", "mere husband ke liye"), why they want it, or chat. Empty if none.
+- customer_name: who the bill is for. If they ask for the bill in a company's name or give a GSTIN, use the company's name ("Tara Interiors Pvt Ltd"), not the person writing.
 - address: the full delivery address as written (house, street, area, landmark, city, PIN), without the person's name or phone number.
 - state: the Indian state or union territory of the delivery address. Infer it from the city or PIN code when not written (Bangalore -> Karnataka, Gurgaon -> Haryana, Noida -> Uttar Pradesh). Empty if there is no address.
 - pincode: the 6-digit PIN code if present.
@@ -240,6 +257,7 @@ const MESSAGES: Record<ParseErrorCode, string> = {
   quota_exceeded: "You've reached today's limit for reading orders. You can still fill the invoice by hand.",
   not_configured: "Order reading isn't set up yet. Add GEMINI_API_KEY in Vercel and redeploy.",
   ai_busy: "Order reading is busy right now. Try again in a minute.",
+  ai_limit: "Order reading has reached its usage limit for now. Try again later, or fill in the invoice by hand.",
   ai_failed: "Couldn't read this message. Try again, or fill the invoice by hand.",
   timeout: "Reading took too long. Try again.",
 };
@@ -251,6 +269,7 @@ const STATUS: Record<ParseErrorCode, number> = {
   quota_exceeded: 429,
   not_configured: 503,
   ai_busy: 503,
+  ai_limit: 503,
   ai_failed: 502,
   timeout: 504,
 };
@@ -338,21 +357,33 @@ export function buildGeminiBody(message: string, catalogue: ParseRequestBody["ca
     },
     contents: [{ role: "user", parts: [{ text: buildUserPrompt(message, catalogue) }] }],
   };
-  if (format === "json_schema") body.generationConfig = { responseMimeType: "application/json", responseJsonSchema: RESPONSE_SCHEMA };
-  if (format === "openapi_schema") body.generationConfig = { responseMimeType: "application/json", responseSchema: toOpenApiSchema(RESPONSE_SCHEMA) };
-  if (format === "json_mime") body.generationConfig = { responseMimeType: "application/json" };
+  if (format === "json_schema") body.generationConfig = { responseMimeType: "application/json", responseJsonSchema: RESPONSE_SCHEMA, thinkingConfig: THINKING };
+  if (format === "openapi_schema") body.generationConfig = { responseMimeType: "application/json", responseSchema: toOpenApiSchema(RESPONSE_SCHEMA), thinkingConfig: THINKING };
+  if (format === "json_mime") body.generationConfig = { responseMimeType: "application/json", thinkingConfig: THINKING };
+  // "plain" sends no generationConfig at all, in case a model refuses any of it.
   return body;
 }
 
-async function callGemini(env: Env, message: string, catalogue: ParseRequestBody["catalogue"], f: Fetch, format: RequestFormat): Promise<Response> {
+async function callGemini(env: Env, message: string, catalogue: ParseRequestBody["catalogue"], f: Fetch, format: RequestFormat, timeoutMs: number): Promise<Response> {
   const model = (env.GEMINI_MODEL || DEFAULT_MODEL).trim();
   const body = buildGeminiBody(message, catalogue, format);
   return f(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY ?? "" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
+}
+
+/**
+ * How long Google asks us to wait before trying again, in seconds, if it says
+ * ("Please retry in 52.3s", a RetryInfo "retryDelay": "52s", or a Retry-After header).
+ */
+export function retryAfterSeconds(errText: string, headers?: Headers): number | null {
+  const header = headers?.get("retry-after");
+  if (header && /^\d+(\.\d+)?$/.test(header.trim())) return Number(header);
+  const m = errText.match(/retry in (\d+(?:\.\d+)?)\s*s/i) ?? errText.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
+  return m ? Number(m[1]) : null;
 }
 
 /** A short description of a response that had no usable text, for the logs (no message content). */
@@ -404,16 +435,26 @@ export async function handleParse(request: Request, env: Env, f: Fetch = fetch, 
 
   const masked = maskPhones(message);
   const model = (env.GEMINI_MODEL || DEFAULT_MODEL).trim();
-  let formatIndex = 0;
+  let formatIndex = preferredFormat;
+  const started = Date.now();
   let busyRetries = 0; // retries for 429 / 5xx / network errors, at most 2
   for (let attempt = 0; attempt < REQUEST_FORMATS.length + 2; attempt++) {
     const format = REQUEST_FORMATS[formatIndex];
+    const left = TOTAL_BUDGET_MS - (Date.now() - started);
+    if (left < 5_000) {
+      console.error("Gemini ran out of time", model, format, `${Date.now() - started}ms`);
+      return fail("timeout");
+    }
+    const callStarted = Date.now();
     let res: Response;
     try {
-      res = await callGemini(env, masked, catalogue, f, format);
+      res = await callGemini(env, masked, catalogue, f, format, Math.min(GEMINI_TIMEOUT_MS, left));
     } catch (e) {
       const name = (e as { name?: string })?.name;
-      if (name === "TimeoutError" || name === "AbortError") return fail("timeout");
+      if (name === "TimeoutError" || name === "AbortError") {
+        console.error("Gemini took too long", model, format, `${Date.now() - callStarted}ms`);
+        return fail("timeout");
+      }
       if (busyRetries < 2) {
         busyRetries++;
         await sleep(800);
@@ -433,6 +474,9 @@ export async function handleParse(request: Request, env: Env, f: Fetch = fetch, 
       try {
         const order = normalizeOrder(extractJson(text), new Set(catalogue.map((p) => p.id)));
         if (formatIndex > 0) console.warn("Gemini accepted request format", model, format);
+        preferredFormat = formatIndex;
+        // Timing only, never message content: shows in Vercel's logs to keep an eye on speed.
+        console.info("Gemini read an order", model, format, `${Date.now() - callStarted}ms`, `items=${order.items.length}`);
         return json({ ok: true, order, remainingToday: who.remaining });
       } catch {
         console.error("Gemini output was not JSON", model, format, describeEmpty(data), `length=${text.length}`);
@@ -459,9 +503,24 @@ export async function handleParse(request: Request, env: Env, f: Fetch = fetch, 
       console.error("Gemini rejected the request", model, format, errText.slice(0, 2000));
       return fail("ai_failed");
     }
-    if ((res.status === 429 || res.status >= 500) && busyRetries < 2) {
+    if (res.status === 429) {
+      // "You exceeded your current quota": the key's usage limit. Trying again straight away can't work and
+      // may use up more of the limit, so only wait if Google says it's a few seconds.
+      const quota = /quota|RESOURCE_EXHAUSTED/i.test(errText);
+      const wait = retryAfterSeconds(errText, res.headers);
+      const waitMs = wait !== null ? Math.ceil(wait * 1000) : quota ? null : 1500;
+      if (waitMs !== null && waitMs <= 8_000 && busyRetries < 2 && left - waitMs > 10_000) {
+        busyRetries++;
+        await sleep(waitMs);
+        continue;
+      }
+      console.error(quota ? "Gemini usage limit reached" : "Gemini error", 429, model, format, errText.slice(0, 2000));
+      return fail(quota ? "ai_limit" : "ai_busy");
+    }
+    if (res.status >= 500 && busyRetries < 2) {
+      // Overloaded ("high demand"): wait a little longer each time.
       busyRetries++;
-      await sleep(res.status === 429 ? 1500 : 800);
+      await sleep(busyRetries === 1 ? 1500 : 3000);
       continue;
     }
     console.error("Gemini error", res.status, model, format, errText.slice(0, 2000));

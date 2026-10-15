@@ -183,7 +183,9 @@ export function draftFromParsed(order: ParsedOrder, originalMessage: string, pro
     } else if (local && local.score >= STRONG_MATCH) {
       product = local.product;
       checks.push({ field: "product", reason: `Is "${item.text}" your ${product.name}?` });
-    } else if (local && local.score >= WEAK_MATCH) {
+    } else if (local && local.score >= WEAK_MATCH && item.confidence !== "none") {
+      // A loose lookalike is only suggested when the AI was unsure. When it said "not in your products",
+      // a lookalike ("silk saree" vs "Silk scarf") would pre-fill the wrong price and HSN.
       product = local.product;
       checks.push({ field: "product", reason: `Not sure "${item.text}" is ${product.name}` });
     }
