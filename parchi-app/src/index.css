@@ -1,0 +1,173 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Same palette as the Parchi landing page */
+    --color-page: #f7f5f0;
+    --color-surface: #ffffff;
+    --color-alt: #efebe3;
+    --color-ink: #16181d;
+    --color-muted: #5b6070;
+    --color-line: #e3ded3;
+    --color-brand: #0e6b4f;
+    --color-brand-hover: #0b5a42;
+    --color-brand-tint: #e7f3ee;
+    --color-highlight: #fff1c2;
+    --color-danger: #b42318;
+    --color-danger-tint: #fdeceb;
+    --color-warn: #7a4b00;
+    --color-warn-tint: #fff4d6;
+    --color-bubble: #eaf5ee;
+    --color-deep: #0f2a22;
+    --color-deep-2: #173a2f;
+    --color-deep-line: #2a4c40;
+    --color-on-deep: #f4f1ea;
+    --color-on-deep-muted: #a8bfb6;
+    --color-mint: #8ad6b5;
+    --color-paper: #fffdf6;
+    color-scheme: light;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-page font-sans text-ink antialiased;
+    font-size: 16px;
+    line-height: 1.55;
+    font-feature-settings: "cv11", "ss01";
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background: var(--color-brand-tint);
+    color: var(--color-ink);
+  }
+
+  dialog::backdrop {
+    background: rgba(22, 24, 29, 0.45);
+  }
+}
+
+@layer components {
+  .wrap {
+    @apply mx-auto w-full max-w-[1168px] px-4 sm:px-5 md:px-6;
+  }
+
+  .h1 {
+    @apply text-[24px] font-semibold leading-[1.2] tracking-[-0.02em] text-ink md:text-[28px];
+  }
+
+  .h3 {
+    @apply text-[16px] font-semibold leading-snug tracking-[-0.01em] text-ink;
+  }
+
+  .muted {
+    @apply text-muted;
+  }
+
+  .card {
+    @apply rounded-card border border-line bg-surface shadow-card;
+  }
+
+  .btn {
+    @apply inline-flex min-h-[44px] items-center justify-center gap-2 whitespace-nowrap rounded-control px-4 text-[15px] font-medium transition-colors duration-150 disabled:cursor-not-allowed;
+  }
+
+  .btn-primary {
+    @apply btn bg-brand text-white hover:bg-brand-hover disabled:bg-[#7fae9f] disabled:hover:bg-[#7fae9f];
+  }
+
+  .btn-secondary {
+    @apply btn border border-line bg-surface text-ink hover:border-[#cfc9bc] hover:bg-[#fcfbf8] disabled:text-muted;
+  }
+
+  .btn-ghost {
+    @apply btn px-3 text-ink hover:bg-alt;
+  }
+
+  .btn-danger {
+    @apply btn border border-[#f1c9c5] bg-surface text-danger hover:bg-danger-tint;
+  }
+
+  .btn-sm {
+    @apply min-h-[36px] px-3 text-[14px];
+  }
+
+  .label {
+    @apply mb-1.5 block text-[14px] font-medium text-ink;
+  }
+
+  .hint {
+    @apply mt-1.5 text-[13px] leading-snug text-muted;
+  }
+
+  .input {
+    @apply block min-h-[44px] w-full rounded-control border border-line bg-surface px-3 text-[16px] text-ink placeholder:text-[#9a9eab] focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand-tint disabled:bg-alt disabled:text-muted;
+  }
+
+  textarea.input {
+    @apply py-2.5 leading-[1.5];
+  }
+
+  select.input {
+    @apply appearance-none bg-no-repeat pr-9;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%235b6070' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+    background-position: right 10px center;
+  }
+
+  .input[aria-invalid="true"] {
+    @apply border-danger focus:ring-danger-tint;
+  }
+
+  /* A field the AI wasn't sure about */
+  .needs-check {
+    @apply border-[#e0b100] bg-[#fffbeb] ring-2 ring-highlight;
+  }
+
+  .field-error {
+    @apply mt-1.5 text-[13px] font-medium text-danger;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[12px] font-medium leading-[20px];
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
