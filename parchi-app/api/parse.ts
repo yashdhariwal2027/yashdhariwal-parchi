@@ -294,24 +294,69 @@ async function checkUserAndQuota(env: Env, token: string, f: Fetch): Promise<{ o
   return { ok: false, code: "ai_busy" };
 }
 
-async function callGemini(env: Env, message: string, catalogue: ParseRequestBody["catalogue"], f: Fetch, useSchema: boolean): Promise<Response> {
-  const model = (env.GEMINI_MODEL || DEFAULT_MODEL).trim();
+/**
+ * Request formats, tried in order. If Gemini answers 400 to one (for a reason other than the API key),
+ * the next, simpler one is tried. The output is validated here either way, so the simpler formats are
+ * just as safe; they only lean more on the instructions.
+ *   json_schema     generationConfig.responseJsonSchema (JSON Schema)
+ *   openapi_schema  generationConfig.responseSchema (Google's older schema format)
+ *   json_mime       JSON output only, schema written into the instructions
+ *   plain           no generationConfig at all, schema written into the instructions
+ */
+export const REQUEST_FORMATS = ["json_schema", "openapi_schema", "json_mime", "plain"] as const;
+export type RequestFormat = (typeof REQUEST_FORMATS)[number];
+
+/** RESPONSE_SCHEMA in the older OpenAPI-style format (upper-case types, no size limits). */
+export function toOpenApiSchema(s: unknown): unknown {
+  if (Array.isArray(s)) return s.map(toOpenApiSchema);
+  if (!s || typeof s !== "object") return s;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(s as Record<string, unknown>)) {
+    if (k === "maxItems" || k === "minItems") continue;
+    if (k === "type" && typeof v === "string") out.type = v.toUpperCase();
+    else if (k === "properties" && v && typeof v === "object") {
+      out.properties = Object.fromEntries(Object.entries(v).map(([pk, pv]) => [pk, toOpenApiSchema(pv)]));
+    } else out[k] = toOpenApiSchema(v);
+  }
+  return out;
+}
+
+export function buildGeminiBody(message: string, catalogue: ParseRequestBody["catalogue"], format: RequestFormat): Record<string, unknown> {
   // Temperature is left at the model's default: Google advises against lowering it for Gemini 3 models.
-  const generationConfig: Record<string, unknown> = { responseMimeType: "application/json" };
-  if (useSchema) generationConfig.responseJsonSchema = RESPONSE_SCHEMA;
-  const body = {
+  const schemaInPrompt = format === "json_mime" || format === "plain";
+  const body: Record<string, unknown> = {
     systemInstruction: {
-      parts: [{ text: useSchema ? SYSTEM_PROMPT : `${SYSTEM_PROMPT}\n\nReturn JSON matching this schema:\n${JSON.stringify(RESPONSE_SCHEMA)}` }],
+      parts: [
+        {
+          text: schemaInPrompt
+            ? `${SYSTEM_PROMPT}\n\nReturn only a JSON object (no other text) matching this schema:\n${JSON.stringify(RESPONSE_SCHEMA)}`
+            : SYSTEM_PROMPT,
+        },
+      ],
     },
     contents: [{ role: "user", parts: [{ text: buildUserPrompt(message, catalogue) }] }],
-    generationConfig,
   };
+  if (format === "json_schema") body.generationConfig = { responseMimeType: "application/json", responseJsonSchema: RESPONSE_SCHEMA };
+  if (format === "openapi_schema") body.generationConfig = { responseMimeType: "application/json", responseSchema: toOpenApiSchema(RESPONSE_SCHEMA) };
+  if (format === "json_mime") body.generationConfig = { responseMimeType: "application/json" };
+  return body;
+}
+
+async function callGemini(env: Env, message: string, catalogue: ParseRequestBody["catalogue"], f: Fetch, format: RequestFormat): Promise<Response> {
+  const model = (env.GEMINI_MODEL || DEFAULT_MODEL).trim();
+  const body = buildGeminiBody(message, catalogue, format);
   return f(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY ?? "" },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
   });
+}
+
+/** A short description of a response that had no usable text, for the logs (no message content). */
+function describeEmpty(data: unknown): string {
+  const d = data as { candidates?: { finishReason?: string }[]; promptFeedback?: { blockReason?: string } } | null;
+  return JSON.stringify({ finishReason: d?.candidates?.[0]?.finishReason ?? null, blockReason: d?.promptFeedback?.blockReason ?? null });
 }
 
 function geminiText(data: unknown): string | null {
@@ -356,56 +401,69 @@ export async function handleParse(request: Request, env: Env, f: Fetch = fetch, 
   if (!who.ok) return fail(who.code);
 
   const masked = maskPhones(message);
-  let useSchema = true;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const model = (env.GEMINI_MODEL || DEFAULT_MODEL).trim();
+  let formatIndex = 0;
+  let busyRetries = 0; // retries for 429 / 5xx / network errors, at most 2
+  for (let attempt = 0; attempt < REQUEST_FORMATS.length + 2; attempt++) {
+    const format = REQUEST_FORMATS[formatIndex];
     let res: Response;
     try {
-      res = await callGemini(env, masked, catalogue, f, useSchema);
+      res = await callGemini(env, masked, catalogue, f, format);
     } catch (e) {
       const name = (e as { name?: string })?.name;
       if (name === "TimeoutError" || name === "AbortError") return fail("timeout");
-      if (attempt < 2) {
+      if (busyRetries < 2) {
+        busyRetries++;
         await sleep(800);
         continue;
       }
+      console.error("Gemini unreachable", model, String(e).slice(0, 300));
       return fail("ai_busy");
     }
 
     if (res.ok) {
       const data = await res.json().catch(() => null);
       const text = geminiText(data);
-      if (!text) return fail("ai_failed");
+      if (!text) {
+        console.error("Gemini returned no text", model, format, describeEmpty(data));
+        return fail("ai_failed");
+      }
       try {
         const order = normalizeOrder(extractJson(text), new Set(catalogue.map((p) => p.id)));
+        if (formatIndex > 0) console.warn("Gemini accepted request format", model, format);
         return json({ ok: true, order, remainingToday: who.remaining });
       } catch {
+        console.error("Gemini output was not JSON", model, format, describeEmpty(data), `length=${text.length}`);
         return fail("ai_failed");
       }
     }
 
     const errText = await res.text().catch(() => "");
-    // If this model/API version doesn't accept the JSON schema field, retry once without it
-    // (the schema is then included in the instructions, and the output is still validated here).
-    if (res.status === 400 && useSchema && /responseJsonSchema|response_json_schema|Unknown name/i.test(errText)) {
-      useSchema = false;
-      continue;
+    if (res.status === 401 || res.status === 403 || (res.status === 400 && /API key|API_KEY/i.test(errText))) {
+      console.error("Gemini rejected the API key", res.status, errText.slice(0, 2000));
+      return fail("not_configured", "The Gemini API key isn't valid. Check GEMINI_API_KEY in Vercel and redeploy.");
     }
-    if (res.status === 400 || res.status === 401 || res.status === 403 || res.status === 404) {
-      console.error("Gemini rejected the request", res.status, errText.slice(0, 500));
-      if (res.status === 401 || res.status === 403 || /API key/i.test(errText)) {
-        return fail("not_configured", "The Gemini API key isn't valid. Check GEMINI_API_KEY in Vercel and redeploy.");
+    if (res.status === 404) {
+      console.error("Gemini model not found", model, errText.slice(0, 2000));
+      return fail("not_configured", "The Gemini model isn't available. Check GEMINI_MODEL in Vercel, or remove it to use the default.");
+    }
+    if (res.status === 400) {
+      // Some models or API versions reject a field in the request. Try the next, simpler format.
+      if (formatIndex < REQUEST_FORMATS.length - 1) {
+        console.warn("Gemini rejected request format, trying a simpler one", model, format, errText.slice(0, 2000));
+        formatIndex++;
+        continue;
       }
-      if (res.status === 404) {
-        return fail("not_configured", "The Gemini model isn't available. Check GEMINI_MODEL in Vercel, or remove it to use the default.");
-      }
+      console.error("Gemini rejected the request", model, format, errText.slice(0, 2000));
       return fail("ai_failed");
     }
-    if ((res.status === 429 || res.status >= 500) && attempt < 2) {
+    if ((res.status === 429 || res.status >= 500) && busyRetries < 2) {
+      busyRetries++;
       await sleep(res.status === 429 ? 1500 : 800);
       continue;
     }
-    console.error("Gemini error", res.status, errText.slice(0, 500));
-    return fail("ai_busy");
+    console.error("Gemini error", res.status, model, format, errText.slice(0, 2000));
+    return fail(res.status === 429 || res.status >= 500 ? "ai_busy" : "ai_failed");
   }
   return fail("ai_busy");
 }
