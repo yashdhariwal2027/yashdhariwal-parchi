@@ -3,7 +3,7 @@ import { calculate, docTypeFor, documentTitle, type CalcInput, type CalcResult }
 import { todayIST } from "../gst/dates";
 import { gstinProblem, isValidGstin, normalizeGstin, stateCodeOfGstin } from "../gst/gstin";
 import { formatPaise } from "../gst/money";
-import { findState, stateByCode, stateFromPin } from "../gst/states";
+import { findState, stateByCode, stateFromPin, stateHintFromAddress } from "../gst/states";
 import { amountInWords } from "../gst/words";
 import { findPhones, findPin, formatPhone } from "../parse/extract";
 import { bestMatch, STRONG_MATCH, WEAK_MATCH } from "../parse/match";
@@ -43,8 +43,68 @@ export function blankLine(): DraftLine {
     discount: 0,
     gstRate: 0,
     rateRule: "fixed",
+    // An item typed in by hand has no GST rate until the seller picks one, so 0% is never used by accident.
+    rateSet: false,
+    saveAsProduct: false,
     checks: [],
   };
+}
+
+/** True when the line still needs a GST rate (only matters for regular GST sellers). */
+export function rateMissing(l: DraftLine): boolean {
+  return l.rateSet === false;
+}
+
+/** The active product with this exact name, if any (so "Save to my products" doesn't make duplicates). */
+export function productNamed(name: string, products: Product[]): Product | undefined {
+  const n = name.trim().toLowerCase().replace(/\s+/g, " ");
+  return n ? products.find((p) => !p.archived && p.name.trim().toLowerCase().replace(/\s+/g, " ") === n) : undefined;
+}
+
+/** A product made from an invoice line, for "Save to my products". */
+export function productFromLine(l: DraftLine): Omit<Product, "id"> {
+  return {
+    name: l.name.trim().slice(0, 120),
+    aliases: "",
+    price: Math.round(l.price * 100) / 100,
+    unit: l.unit,
+    hsn: /^\d{4}(\d{2}){0,2}$/.test(l.hsn) ? l.hsn : null,
+    gst_rate: l.rateRule === "apparel_2500" ? 5 : l.gstRate,
+    rate_rule: l.rateRule,
+    archived: false,
+  };
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const wordRe = (w: string) => new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRe(w)}(?=$|[^\\p{L}\\p{N}])`, "iu");
+
+/** Who the item is for, or chat, rather than a detail of the product ("mere husband ke liye", "for my sister"). */
+const NOT_A_PRODUCT_DETAIL = /\b(ke liye|ki liye|ka liye|keliye|for (my|me|her|him|his|our|their|the)\b|gift for|mere|meri|mera|hamare|hamari)\b/i;
+
+/**
+ * Builds the item name and the "size, colour" text from what the AI read, without repeating words
+ * ("Black tshirt, black") and without notes about who it's for.
+ */
+export function nameAndVariant(text: string, colour: string, size: string, details: string, productName?: string): { name: string; variant: string } {
+  const parts = [colour, size, NOT_A_PRODUCT_DETAIL.test(details) ? "" : details].map((s) => s.trim()).filter(Boolean);
+  let name = productName ?? text.trim();
+  if (!productName) {
+    // Take colour and size out of a typed name ("black tshirt XL" -> "tshirt"), if something is left.
+    let stripped = name;
+    for (const p of [colour, size].map((s) => s.trim()).filter(Boolean)) stripped = stripped.replace(wordRe(p), "$1");
+    stripped = stripped.replace(/\s+/g, " ").replace(/^[\s,.-]+|[\s,.-]+$/g, "");
+    if (stripped) name = stripped;
+  }
+  const seen = new Set<string>();
+  const variant = parts
+    .filter((p) => {
+      const k = p.toLowerCase();
+      if (seen.has(k) || wordRe(p).test(name)) return false;
+      seen.add(k);
+      return true;
+    })
+    .join(", ");
+  return { name: capitalise(name), variant };
 }
 
 export function lineFromProduct(p: Product, qty = 1): DraftLine {
@@ -58,6 +118,7 @@ export function lineFromProduct(p: Product, qty = 1): DraftLine {
     price: Number(p.price),
     gstRate: Number(p.gst_rate),
     rateRule: p.rate_rule,
+    rateSet: true,
   };
 }
 
@@ -112,7 +173,6 @@ export function draftFromParsed(order: ParsedOrder, originalMessage: string, pro
   d.notes = order.notes;
 
   d.lines = order.items.map((item) => {
-    const variant = [item.colour, item.size, item.details].filter(Boolean).join(", ");
     let product: Product | undefined = item.productId ? byId.get(item.productId) : undefined;
     const checks: CheckFlag[] = [];
     const local = bestMatch(item.text, active);
@@ -123,15 +183,18 @@ export function draftFromParsed(order: ParsedOrder, originalMessage: string, pro
     } else if (local && local.score >= STRONG_MATCH) {
       product = local.product;
       checks.push({ field: "product", reason: `Is "${item.text}" your ${product.name}?` });
-    } else if (local && local.score >= WEAK_MATCH) {
+    } else if (local && local.score >= WEAK_MATCH && item.confidence !== "none") {
+      // A loose lookalike is only suggested when the AI was unsure. When it said "not in your products",
+      // a lookalike ("silk saree" vs "Silk scarf") would pre-fill the wrong price and HSN.
       product = local.product;
       checks.push({ field: "product", reason: `Not sure "${item.text}" is ${product.name}` });
     }
 
+    const nv = nameAndVariant(item.text, item.colour, item.size, item.details, product?.name);
     const line: DraftLine = product
-      ? { ...lineFromProduct(product, item.quantity), variant }
-      : { ...blankLine(), name: capitalise(item.text) || "Item", qty: item.quantity, variant };
-    if (!product) checks.push({ field: "price", reason: "Not in your products. Enter the price" });
+      ? { ...lineFromProduct(product, item.quantity), variant: nv.variant }
+      : { ...blankLine(), name: nv.name || "Item", qty: item.quantity, variant: nv.variant };
+    if (!product) checks.push({ field: "price", reason: "Not in your products. Enter the price, HSN and GST rate" });
     if (!item.quantityStated) checks.push({ field: "qty", reason: "Quantity not mentioned" });
     line.checks = checks;
     return line;
@@ -178,7 +241,17 @@ export function calcDraft(d: Draft, b: Business): CalcResult {
 }
 
 export function titleFor(d: Draft, b: Business, c: CalcResult): string {
-  return documentTitle(b.gst_status, c.lines.map((l) => l.rate), isValidGstin(d.customerGstin));
+  // Lines still waiting for a GST rate don't count, so a draft isn't titled "Bill of Supply" by accident.
+  const rates = c.lines.filter((_, i) => !(d.lines[i] && rateMissing(d.lines[i]))).map((l) => l.rate);
+  return documentTitle(b.gst_status, rates, isValidGstin(d.customerGstin));
+}
+
+/** "Save to my products" happens once the item has what a product needs. */
+export function readyToSaveAsProduct(l: DraftLine, b: Business): boolean {
+  if (!l.saveAsProduct || l.productId || !l.name.trim() || !(l.price > 0)) return false;
+  if (b.gst_status !== "unregistered" && !/^\d{4}(\d{2}){0,2}$/.test(l.hsn)) return false;
+  if (b.gst_status === "regular" && rateMissing(l)) return false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -211,6 +284,10 @@ export function checkDraft(d: Draft, b: Business, c: CalcResult, today = todayIS
     if (!(l.qty > 0)) block("item_qty", `${n}quantity must be more than 0.`, "qty", l.key);
     if (needsHsn && !/^\d{4}(\d{2}){0,2}$/.test(l.hsn)) {
       block("item_hsn", `${n}add the HSN code (4, 6 or 8 digits). It's required on GST invoices.`, "hsn", l.key);
+    }
+    if (tax && rateMissing(l)) block("item_rate", `${n}choose the GST rate.`, "gstRate", l.key);
+    if (l.saveAsProduct && !l.productId && !(l.price > 0)) {
+      block("item_save_price", `${n}add the price to save it to your products, or untick "Save to my products".`, "price", l.key);
     }
     if (l.price <= 0) warn("item_price", `${n}price is ₹0.`, "price");
     if (l.discount > l.qty * l.price) block("item_discount", `${n}discount is more than the item's value.`, "discount", l.key);
@@ -253,6 +330,14 @@ export function checkDraft(d: Draft, b: Business, c: CalcResult, today = todayIS
   if (tax && !isValidGstin(d.customerGstin) && c.taxable >= 5000000) {
     if (!d.customerAddress.trim()) block("address_50k", "For invoices of ₹50,000 or more, add the customer's address.", "customerAddress");
     if (!d.customerStateCode) block("state_50k", "For invoices of ₹50,000 or more, add the customer's state.", "customerState");
+  }
+
+  const sellerHint = stateHintFromAddress(b.address, b.pincode);
+  if (b.gst_status !== "unregistered" && sellerHint && sellerHint.state.code !== b.state_code) {
+    warn(
+      "seller_state",
+      `Your business address mentions ${sellerHint.word.replace(/\b\w/g, (x) => x.toUpperCase())} (${sellerHint.state.name}), but your state in Settings is ${stateByCode(b.state_code)?.name ?? "different"}. The state decides CGST + SGST or IGST, so check Settings before issuing.`,
+    );
   }
 
   if (c.grandTotal > 5000000) {
@@ -303,6 +388,8 @@ export function draftToRow(d: Draft, b: Business): InvoiceWrite {
       discount: l.discount,
       gst_rate: l.gstRate,
       rate_rule: l.rateRule,
+      ...(rateMissing(l) ? { rate_set: false } : {}),
+      ...(l.saveAsProduct && !l.productId ? { save_product: true } : {}),
       rate: r.rate,
       gross_p: r.gross,
       taxable_p: r.taxable,
@@ -386,6 +473,8 @@ export function rowToDraft(row: InvoiceRow): Draft {
       discount: Number(l.discount) || 0,
       gstRate: Number(l.gst_rate),
       rateRule: l.rate_rule,
+      rateSet: l.rate_set !== false,
+      saveAsProduct: l.save_product === true,
       checks: [],
     })),
   };

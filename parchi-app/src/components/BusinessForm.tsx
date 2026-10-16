@@ -1,7 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { ImagePlus, Trash2 } from "lucide-react";
 import { Field, Notice, Spinner } from "./ui";
-import { STATES } from "@/lib/gst/states";
+import { STATES, stateByCode, stateHintFromAddress } from "@/lib/gst/states";
 import { gstinMessage, gstinProblem, normalizeGstin } from "@/lib/gst/gstin";
 import { fyLabel, todayIST } from "@/lib/gst/dates";
 import { imageToDataUrl } from "@/lib/image";
@@ -79,6 +79,8 @@ export function BusinessForm({
   const [error, setError] = useState<string | null>(null);
   const [imgError, setImgError] = useState<string | null>(null);
   const errors = submitted ? validateBusiness(b) : {};
+  const hint = b.state_code ? stateHintFromAddress(b.address, b.pincode) : undefined;
+  const addressHint = hint && hint.state.code !== b.state_code ? hint : undefined;
   const set = <K extends keyof BusinessInput>(k: K, v: BusinessInput[K]) => setB((x) => ({ ...x, [k]: v }));
   const registered = b.gst_status !== "unregistered";
 
@@ -174,6 +176,16 @@ export function BusinessForm({
               )}
             </Field>
           </div>
+          {addressHint && (
+            <div className="sm:col-span-2" data-testid="address-state-warning">
+              <Notice tone="warn">
+                {addressHint.from === "pin" ? "Your PIN code " : "Your address mentions "}
+                {addressHint.word.replace(/\b\w/g, (c) => c.toUpperCase())}, which is in {addressHint.state.name}, but your state is set to{" "}
+                {stateByCode(b.state_code)?.name}. Your state, GSTIN and address should all match your GST registration, because the state
+                decides whether customers pay CGST + SGST or IGST.
+              </Notice>
+            </div>
+          )}
           {full && (
             <>
               <div data-field="phone">

@@ -90,7 +90,8 @@
   }
 
   .btn-primary {
-    @apply btn bg-brand text-white hover:bg-brand-hover disabled:bg-[#7fae9f] disabled:hover:bg-[#7fae9f];
+    /* Disabled stays readable (white on #3a7a66 is 5:1), so text like "Preparing PDF..." passes contrast checks */
+    @apply btn bg-brand text-white hover:bg-brand-hover disabled:bg-[#3a7a66] disabled:hover:bg-[#3a7a66];
   }
 
   .btn-secondary {
@@ -169,5 +170,259 @@
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* ---------- Landing page (same styles as the original Parchi landing page) ---------- */
+
+@layer components {
+  .landing {
+    font-size: 17px;
+    line-height: 1.6;
+  }
+
+  .landing section[id] {
+    scroll-margin-top: 72px;
+  }
+
+  .section {
+    @apply py-12 md:py-16;
+  }
+
+  .h2 {
+    @apply text-[28px] font-semibold leading-[1.15] tracking-[-0.02em] text-ink md:text-[36px];
+  }
+
+  .lede {
+    @apply text-[17px] leading-relaxed text-muted;
+  }
+
+  .eyebrow {
+    @apply text-[13px] font-medium uppercase tracking-[0.06em] text-muted;
+  }
+
+  .icon-tile {
+    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-control bg-brand-tint text-brand;
+  }
+
+  .hand {
+    font-family: "Caveat", "Segoe Print", "Bradley Hand", cursive;
+  }
+}
+
+/* ---------- Backgrounds ---------- */
+
+/* Fine dot grid behind the hero, faded out towards the edges. */
+.bg-dots {
+  position: relative;
+  isolation: isolate;
+}
+
+.bg-dots::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Ccircle cx='1.5' cy='1.5' r='1.2' fill='%23c9c2b3'/%3E%3C/svg%3E");
+  background-size: 22px 22px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 75% at 50% 35%, #000 30%, transparent 78%);
+  mask-image: radial-gradient(ellipse 70% 75% at 50% 35%, #000 30%, transparent 78%);
+  pointer-events: none;
+}
+
+/* Ruled paper for the handwritten bill book. */
+.ruled {
+  background-color: var(--color-paper);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='30'%3E%3Crect y='29' width='8' height='1' fill='%23d9e3ef'/%3E%3C/svg%3E");
+  background-size: 8px 30px;
+}
+
+/* ---------- Demo animation ---------- */
+
+.demo-seg {
+  border-radius: 4px;
+  padding: 1px 2px;
+  margin: 0 -2px;
+  background-color: transparent;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  transition: background-color 200ms ease-out;
+}
+
+.demo-seg[data-on="true"] {
+  background-color: var(--color-highlight);
+}
+
+/* A slot holds a placeholder and the real content in the same grid cell,
+   so swapping between them never changes the card's height. */
+.demo-slot {
+  display: grid;
+}
+
+.demo-slot > * {
+  grid-area: 1 / 1;
+}
+
+.demo-slot > .demo-placeholder {
+  align-self: center;
+  pointer-events: none;
+  transition: opacity 200ms ease-out;
+}
+
+.demo-slot > .demo-real {
+  position: relative;
+  z-index: 1;
+}
+
+.demo-slot > .demo-real {
+  transition:
+    opacity 250ms ease-out,
+    transform 250ms ease-out;
+}
+
+.demo-slot[data-on="false"] > .demo-real {
+  opacity: 0;
+  transform: translateY(8px);
+  visibility: hidden;
+}
+
+.demo-slot[data-on="true"] > .demo-placeholder {
+  opacity: 0;
+  visibility: hidden;
+}
+
+.demo-ph-bar {
+  display: inline-block;
+  vertical-align: middle;
+  border-radius: 8px;
+  background: var(--color-alt);
+}
+
+.fade-up {
+  animation: fade-up 280ms ease-out both;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.demo-status-in {
+  animation: demo-status-in 250ms ease-out both;
+}
+
+@keyframes demo-status-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* First-paint "initialising" treatment for the demo cards */
+.demo-boot {
+  animation: demo-boot 600ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@keyframes demo-boot {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.demo-pulse {
+  animation: demo-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes demo-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Crossfade panels (How it works mocks) */
+.xfade {
+  display: grid;
+}
+
+.xfade > * {
+  grid-area: 1 / 1;
+  transition:
+    opacity 250ms ease-out,
+    transform 250ms ease-out;
+}
+
+.xfade > [data-active="false"] {
+  opacity: 0;
+  transform: translateY(8px);
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.photo-zoom img {
+  transition: transform 500ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.photo-zoom:hover img {
+  transform: scale(1.04);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .demo-seg,
+  .demo-slot > *,
+  .xfade > *,
+  .photo-zoom img {
+    transition: none !important;
+  }
+  .photo-zoom:hover img {
+    transform: none;
+  }
+  .demo-boot,
+  .demo-pulse,
+  .demo-status-in,
+  .fade-up {
+    animation: none !important;
+  }
+}
+
+/* The 30-second challenge: a wrong tap gives a small shake */
+.challenge-wrong {
+  animation: challenge-wrong 400ms ease-in-out;
+}
+
+@keyframes challenge-wrong {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-4px);
+  }
+  75% {
+    transform: translateX(4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .challenge-wrong {
+    animation: none !important;
   }
 }

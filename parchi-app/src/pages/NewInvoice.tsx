@@ -4,7 +4,7 @@ import { ChevronDown, ClipboardPaste, Eye, FileText, Plus, Sparkles, Trash2 } fr
 import type { ParseResponse } from "../../api/parse";
 import { useAuth, useBusiness } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
-import { deleteDraft, getInvoice, issueInvoice, listProducts, nextNumberPreview, saveDraft } from "@/lib/db";
+import { createProduct, deleteDraft, getInvoice, issueInvoice, listProducts, nextNumberPreview, saveDraft } from "@/lib/db";
 import { friendlyError } from "@/lib/errors";
 import {
   blankLine,
@@ -15,6 +15,10 @@ import {
   draftToRow,
   emptyDraft,
   lineFromProduct,
+  productFromLine,
+  productNamed,
+  rateMissing,
+  readyToSaveAsProduct,
   rowToDraft,
   type Issue,
 } from "@/lib/invoice/draft";
@@ -158,6 +162,9 @@ export function NewInvoice() {
       setDraft={setDraft as (u: (d: Draft) => Draft) => void}
       message={message}
       onStartOver={startOver}
+      onProductsAdded={(added) =>
+        setProducts((cur) => [...(cur ?? []), ...added].sort((a, b) => a.name.localeCompare(b.name, "en", { sensitivity: "base" })))
+      }
       onSaved={(id) => {
         saveWip(uid, null);
         if (id !== draftId) navigate(`/drafts/${id}`, { replace: true });
@@ -361,6 +368,7 @@ function Editor({
   setDraft,
   message,
   onStartOver,
+  onProductsAdded,
   onSaved,
   onIssued,
   onDeleted,
@@ -371,6 +379,7 @@ function Editor({
   setDraft: (u: (d: Draft) => Draft) => void;
   message: string;
   onStartOver: () => void;
+  onProductsAdded: (added: Product[]) => void;
   onSaved: (id: string) => void;
   onIssued: (row: InvoiceRow) => void;
   onDeleted: () => void;
@@ -447,8 +456,28 @@ function Editor({
 
   // ----- actions -----
   async function persist(): Promise<string> {
-    const row = await saveDraft(draft.id, draftToRow(draft, biz));
-    setDraft((d) => ({ ...d, id: row.id }));
+    // "Save to my products": add each ticked item (or link to a product with the same name) before saving.
+    const made: Product[] = [];
+    const linkedTo = new Map<string, string>();
+    try {
+      for (const l of draft.lines) {
+        if (!readyToSaveAsProduct(l, biz)) continue;
+        let p = productNamed(l.name, [...active, ...made]);
+        if (!p) {
+          const saved = await createProduct(productFromLine(l));
+          p = { ...saved, price: Number(saved.price), gst_rate: Number(saved.gst_rate) };
+          made.push(p);
+        }
+        linkedTo.set(l.key, p.id);
+      }
+    } finally {
+      if (made.length) onProductsAdded(made);
+    }
+    const link = (l: DraftLine): DraftLine => (linkedTo.has(l.key) ? { ...l, productId: linkedTo.get(l.key)!, saveAsProduct: false } : l);
+    const toSave = { ...draft, lines: draft.lines.map(link) };
+    const row = await saveDraft(draft.id, draftToRow(toSave, biz));
+    setDraft((d) => ({ ...d, id: row.id, lines: d.lines.map(link) }));
+    if (made.length) toast(made.length === 1 ? `${made[0].name} added to your products` : `${made.length} items added to your products`);
     return row.id;
   }
 
@@ -993,6 +1022,8 @@ function ItemEditor({
   const flag = (f: string) => line.checks.find((c) => c.field === f);
   const n = index + 1;
   const linked = line.productId && products.some((p) => p.id === line.productId);
+  const noRate = regular && rateMissing(line);
+  const sameName = !linked && line.name.trim() ? productNamed(line.name, products) : undefined;
 
   return (
     <div className={cn("rounded-control border border-line p-3 sm:p-4", line.checks.length > 0 && "border-[#e8cf7a] bg-[#fffdf5]")}>
@@ -1089,19 +1120,25 @@ function ItemEditor({
           <Field
             label="GST rate"
             className="col-span-2 sm:col-span-3"
-            hint={line.rateRule === "apparel_2500" && result ? `${formatRate(result.rate)} applies at this price.` : undefined}
+            error={errFor("gstRate")}
+            hint={line.rateRule === "apparel_2500" && result && !noRate ? `${formatRate(result.rate)} applies at this price.` : undefined}
           >
             {(p) => (
               <select
                 {...p}
-                className="input"
-                value={line.rateRule === "apparel_2500" ? "apparel" : String(line.gstRate)}
+                className={cn("input", noRate && "needs-check")}
+                value={noRate ? "" : line.rateRule === "apparel_2500" ? "apparel" : String(line.gstRate)}
                 onChange={(e) =>
                   e.target.value === "apparel"
-                    ? onPatch({ rateRule: "apparel_2500" })
-                    : onPatch({ rateRule: "fixed", gstRate: Number(e.target.value) })
+                    ? onPatch({ rateRule: "apparel_2500", rateSet: true })
+                    : onPatch({ rateRule: "fixed", gstRate: Number(e.target.value), rateSet: true })
                 }
               >
+                {noRate && (
+                  <option value="" disabled>
+                    Choose GST rate
+                  </option>
+                )}
                 <option value="apparel">Clothing/footwear: 5% or 18%</option>
                 {GST_RATES.map((r) => (
                   <option key={r} value={String(r)}>
@@ -1125,9 +1162,41 @@ function ItemEditor({
         )}
       </div>
 
+      {!linked && line.name.trim() !== "" && (
+        <div className="mt-3 text-[14px]">
+          {sameName ? (
+            <p className="text-muted">
+              "{sameName.name}" is already in your products.{" "}
+              <button type="button" className="font-medium text-brand underline underline-offset-2" onClick={() => onChooseProduct(sameName.id)}>
+                Use it
+              </button>
+            </p>
+          ) : (
+            <div className="flex items-start gap-2">
+              <input
+                id={`save-${line.key}`}
+                type="checkbox"
+                className="mt-[3px] h-4 w-4 shrink-0 cursor-pointer accent-[var(--color-brand)]"
+                checked={line.saveAsProduct === true}
+                aria-describedby={`save-hint-${line.key}`}
+                onChange={(e) => onPatch({ saveAsProduct: e.target.checked })}
+              />
+              <div>
+                <label htmlFor={`save-${line.key}`} className="cursor-pointer">
+                  Save to my products
+                </label>
+                <p id={`save-hint-${line.key}`} className="text-[13px] text-muted">
+                  Next time Parchi fills in its price, HSN and GST rate.
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       <p className="mt-3 flex items-center justify-between border-t border-line pt-2.5 text-[14px]">
         <span className="text-muted">
-          {regular && result ? `Amount (${formatRate(result.rate)} GST)` : "Amount"}
+          {regular && result && !noRate ? `Amount (${formatRate(result.rate)} GST)` : "Amount"}
         </span>
         <span className="tabular font-semibold" data-testid={`line-total-${index}`}>
           {formatPaise(result?.total ?? 0)}

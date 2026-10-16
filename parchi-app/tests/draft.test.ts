@@ -206,3 +206,164 @@ test("saving and reopening a draft keeps everything; stored totals match the cal
   assert.equal(draftToRow(d, biz({ gst_status: "composition" })).doc_type, "bill_of_supply");
   assert.equal(draftToRow(d, biz({ gst_status: "unregistered", gstin: null })).doc_type, "invoice");
 });
+
+// ---------------------------------------------------------------------------------------------
+// 15 Oct 2026 update: what Gemini actually returned for the Priya Nair test message
+// ---------------------------------------------------------------------------------------------
+
+const PRIYA_MESSAGE = `hello didi 🙏
+pink kurti chahiye L size mein, 2 piece... nahi nahi 3 kar do, meri sister ke liye bhi
+saath mein matching dupatta bhi bhej dena
+aur ek black tshirt XL, mere husband ke liye
+Priya Nair
+Flat 302, Green Glen Layout, Bellandur, near Central Mall, Bangalore 560103
++91-98111 22334
+GPay se advance kar dungi. total 4000 kar do na please 😅
+Saturday tak pahunch jana chahiye, gift wrap karna`;
+
+const priyaOrder = (): ParsedOrder =>
+  order({
+    customerName: "Priya Nair",
+    address: "Flat 302, Green Glen Layout, Bellandur, near Central Mall, Bangalore 560103",
+    city: "Bangalore",
+    state: "Karnataka",
+    pincode: "560103",
+    payment: "prepaid",
+    notes: "total 4000 kar do na please, Saturday tak pahunch jana chahiye, gift wrap karna",
+    items: [
+      { productId: "p-kurta", confidence: "high", text: "pink kurti", quantity: 3, quantityStated: true, size: "L", colour: "pink", details: "" },
+      { productId: "p-dupatta", confidence: "high", text: "matching dupatta", quantity: 1, quantityStated: false, size: "", colour: "", details: "matching" },
+      { productId: "", confidence: "none", text: "black tshirt", quantity: 1, quantityStated: true, size: "XL", colour: "black", details: "mere husband ke liye" },
+    ],
+  });
+
+test("item names don't repeat the colour, and 'who it's for' isn't printed as a product detail", async () => {
+  const { nameAndVariant } = await import("../src/lib/invoice/draft");
+  const d = draftFromParsed(priyaOrder(), PRIYA_MESSAGE, products);
+  assert.deepEqual(
+    d.lines.map((l) => [l.name, l.variant]),
+    [
+      ["Kurta", "pink, L"],
+      ["Dupatta", "matching"],
+      ["Tshirt", "black, XL"],
+    ],
+  );
+  assert.deepEqual(nameAndVariant("blue kurta", "Blue", "M", "for my sister"), { name: "Kurta", variant: "Blue, M" });
+  assert.deepEqual(nameAndVariant("cotton saree", "red", "", "pure cotton"), { name: "Cotton saree", variant: "red, pure cotton" });
+  assert.deepEqual(nameAndVariant("XL", "", "XL", ""), { name: "XL", variant: "" }, "never strips the whole name");
+  assert.deepEqual(nameAndVariant("Mug", "", "", "engrave: Riya ke liye"), { name: "Mug", variant: "" }, "cautious: drops it rather than print a note");
+  assert.deepEqual(nameAndVariant("kurta", "blue", "M", "", "Kurta"), { name: "Kurta", variant: "blue, M" });
+  assert.deepEqual(nameAndVariant("kurta", "Blue", "M", "blue", "Blue Kurta"), { name: "Blue Kurta", variant: "M" }, "no word repeated from the product name");
+});
+
+test("an item that isn't in the products has no GST rate until the seller picks one", async () => {
+  const { rateMissing, titleFor } = await import("../src/lib/invoice/draft");
+  const d = draftFromParsed(priyaOrder(), PRIYA_MESSAGE, products);
+  const tshirt = d.lines[2];
+  assert.equal(rateMissing(tshirt), true);
+  assert.equal(rateMissing(d.lines[0]), false);
+  assert.match(tshirt.checks.map((c) => c.reason).join(), /price, HSN and GST rate/);
+
+  // Seller fills price and HSN but forgets the rate: can't issue.
+  const filled: Draft = { ...d, checks: [], lines: d.lines.map((l, i) => ({ ...l, checks: [], ...(i === 2 ? { price: 499, hsn: "6109" } : {}) })) };
+  const issues = checkDraft(filled, biz(), calcDraft(filled, biz()));
+  assert.ok(issues.some((i) => i.level === "block" && i.code === "item_rate" && /Item 3: choose the GST rate/.test(i.message)));
+  // ...and the draft isn't titled "Invoice-cum-Bill of Supply" because of the 0% placeholder.
+  assert.equal(titleFor(filled, biz(), calcDraft(filled, biz())), "Tax Invoice");
+
+  // Picks 5%: nothing blocks, totals as worked out earlier (Delhi seller, Karnataka buyer, IGST).
+  const chosen: Draft = { ...filled, lines: filled.lines.map((l, i) => (i === 2 ? { ...l, rateRule: "fixed" as const, gstRate: 5, rateSet: true } : l)) };
+  const c = calcDraft(chosen, biz());
+  assert.deepEqual(checkDraft(chosen, biz(), c).filter((i) => i.level === "block"), []);
+  assert.equal(c.intraState, false);
+  assert.deepEqual([c.taxable, c.igst, c.cgst, c.grandTotal], [475715, 23785, 0, 499500]);
+
+  // Composition and unregistered sellers don't charge GST, so there's nothing to choose.
+  for (const gst_status of ["composition", "unregistered"] as const) {
+    const b = biz({ gst_status });
+    assert.ok(!checkDraft(filled, b, calcDraft(filled, b)).some((i) => i.code === "item_rate"));
+  }
+
+  // A hand-added line starts without a rate too.
+  const { blankLine } = await import("../src/lib/invoice/draft");
+  assert.equal(rateMissing(blankLine()), true);
+});
+
+test("the unchosen rate and the 'save to products' tick survive saving and reopening a draft", async () => {
+  const d = draftFromParsed(priyaOrder(), PRIYA_MESSAGE, products);
+  d.lines[2].saveAsProduct = true;
+  const row = { ...draftToRow(d, biz()), id: "x" } as unknown as InvoiceRow;
+  assert.equal(row.lines[2].rate_set, false);
+  assert.equal(row.lines[2].save_product, true);
+  assert.equal("rate_set" in row.lines[0], false, "nothing extra stored on normal lines");
+  const back = rowToDraft(row);
+  assert.equal(back.lines[2].rateSet, false);
+  assert.equal(back.lines[2].saveAsProduct, true);
+  assert.equal(back.lines[0].rateSet, true);
+  // Older drafts (stored before this field existed) count as chosen.
+  const old = { ...row, lines: row.lines.map(({ rate_set: _r, save_product: _s, ...l }) => l) } as unknown as InvoiceRow;
+  assert.equal(rowToDraft(old).lines[2].rateSet, true);
+});
+
+test("Save to my products: only when complete, never a duplicate name", async () => {
+  const { productFromLine, productNamed, readyToSaveAsProduct } = await import("../src/lib/invoice/draft");
+  const d = draftFromParsed(priyaOrder(), PRIYA_MESSAGE, products);
+  const t = { ...d.lines[2], saveAsProduct: true };
+  assert.equal(readyToSaveAsProduct(t, biz()), false, "no price yet");
+  assert.equal(readyToSaveAsProduct({ ...t, price: 499 }, biz()), false, "no HSN yet");
+  assert.equal(readyToSaveAsProduct({ ...t, price: 499, hsn: "6109" }, biz()), false, "no GST rate yet");
+  const done = { ...t, price: 499, hsn: "6109", rateRule: "apparel_2500" as const, rateSet: true };
+  assert.equal(readyToSaveAsProduct(done, biz()), true);
+  assert.equal(readyToSaveAsProduct({ ...done, saveAsProduct: false }, biz()), false, "only when ticked");
+  assert.equal(readyToSaveAsProduct({ ...t, price: 499 }, biz({ gst_status: "unregistered" })), true, "unregistered sellers need only a price");
+  assert.deepEqual(productFromLine(done), {
+    name: "Tshirt",
+    aliases: "",
+    price: 499,
+    unit: "PCS",
+    hsn: "6109",
+    gst_rate: 5,
+    rate_rule: "apparel_2500",
+    archived: false,
+  });
+  assert.equal(productNamed("  kurta ", products)?.id, "p-kurta");
+  assert.equal(productNamed("Tshirt", products), undefined);
+  assert.equal(productNamed("Kurta", [{ ...products[0], archived: true }]), undefined);
+
+  // Ticked but no price: blocks issuing with a clear message (untick to issue without saving).
+  const blocked: Draft = { ...d, checks: [], lines: d.lines.map((l, i) => ({ ...l, checks: [], ...(i === 2 ? { saveAsProduct: true, hsn: "6109", rateSet: true, gstRate: 5 } : {}) })) };
+  const issues = checkDraft(blocked, biz(), calcDraft(blocked, biz()));
+  assert.ok(issues.some((i) => i.code === "item_save_price" && /untick/.test(i.message)));
+});
+
+test("seller address in another state than the GST state is flagged", async () => {
+  const { stateHintFromAddress } = await import("../src/lib/gst/states");
+  assert.equal(stateHintFromAddress("10, 1st Cross Street, Udyog Vihar, Gurgaon")?.state.name, "Haryana");
+  assert.equal(stateHintFromAddress("Plot 4, Sector 18", "122015")?.state.name, "Haryana", "PIN code field");
+  assert.equal(stateHintFromAddress("Shop 2, MG Road, Bangalore 560001")?.state.name, "Karnataka", "PIN inside the address");
+  assert.equal(stateHintFromAddress("Lajpat Nagar, New Delhi", "110024")?.state.name, "Delhi");
+  assert.equal(stateHintFromAddress("Sector 62, Noida, near Delhi border"), undefined, "two states named: unclear, so no warning");
+  assert.equal(stateHintFromAddress("Shop 5, Upper Bazaar"), undefined, "'up' inside words isn't Uttar Pradesh");
+  assert.equal(stateHintFromAddress(""), undefined);
+
+  const ready = draftFromParsed(order(), MESSAGE, products);
+  const gurgaonSeller = biz({ address: "10, 1st Cross Street, Udyog Vihar, Gurgaon", pincode: null, state_code: "07" });
+  const w = checkDraft(ready, gurgaonSeller, calcDraft(ready, gurgaonSeller)).find((i) => i.code === "seller_state");
+  assert.equal(w?.level, "warn");
+  assert.match(w!.message, /Gurgaon \(Haryana\).*Delhi/);
+  assert.ok(!checkDraft(ready, biz(), calcDraft(ready, biz())).some((i) => i.code === "seller_state"), "matching address: no warning");
+});
+
+test("a lookalike never overrides the AI's 'not in your products' (silk saree is not Silk scarf)", () => {
+  const withScarf: Product[] = [...products, { id: "p-scarf", name: "Silk scarf", aliases: "", price: 799, unit: "PCS", hsn: "6214", gst_rate: 5, rate_rule: "fixed", archived: false }];
+  const saree = order({ items: [{ productId: "", confidence: "none", text: "Banarasi silk saree", quantity: 1, quantityStated: true, size: "", colour: "red", details: "" }] });
+  const d = draftFromParsed(saree, MESSAGE, withScarf);
+  assert.equal(d.lines[0].productId, null);
+  assert.equal(d.lines[0].name, "Banarasi silk saree");
+  assert.equal(d.lines[0].price, 0);
+  // A near-exact spelling the AI missed is still picked up, and flagged.
+  const typo = order({ items: [{ productId: "", confidence: "none", text: "dupata", quantity: 1, quantityStated: true, size: "", colour: "", details: "" }] });
+  const d2 = draftFromParsed(typo, MESSAGE, withScarf);
+  assert.equal(d2.lines[0].productId, "p-dupatta");
+  assert.ok(d2.lines[0].checks.some((c) => c.field === "product"));
+});

@@ -1,4 +1,6 @@
 import { useState, type FormEvent } from "react";
+import { Link, useSearchParams } from "react-router";
+import { planById, rememberPlan } from "@/lib/plans";
 import { supabase } from "@/lib/supabase";
 import { Field, Notice, Spinner, Wordmark } from "@/components/ui";
 import { cn } from "@/lib/utils";
@@ -19,7 +21,10 @@ function authMessage(msg: string): string {
 }
 
 export function SignIn() {
-  const [mode, setMode] = useState<Mode>("signin");
+  const [params] = useSearchParams();
+  const picked = planById(params.get("plan"));
+  const [mode, setMode] = useState<Mode>(params.get("mode") === "signup" || picked ? "signup" : "signin");
+  if (picked) rememberPlan(picked.id);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -75,7 +80,15 @@ export function SignIn() {
   return (
     <main className="flex min-h-dvh items-start justify-center px-4 py-10 sm:items-center">
       <div className="w-full max-w-[400px]">
-        <Wordmark className="mb-6" />
+        <Link to="/" className="mb-6 inline-block">
+          <Wordmark />
+        </Link>
+        {picked && mode === "signup" && (
+          <p className="mb-3 text-[14px] text-muted" data-testid="picked-plan">
+            You picked <strong className="text-ink">{picked.name}</strong>, ₹{picked.price} for 30 days. Create your account, set up your business,
+            then pay.
+          </p>
+        )}
         <div className="card p-5 sm:p-7">
           <h1 className="h1">{title}</h1>
           <p className="mt-1.5 text-[15px] text-muted">

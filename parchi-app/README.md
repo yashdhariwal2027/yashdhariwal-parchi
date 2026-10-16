@@ -13,7 +13,7 @@ Paste a customer's WhatsApp or Instagram order message, and Parchi turns it into
 - Also included: UPI scan-to-pay QR, paid/unpaid tracking, and CA exports (invoice register and HSN summary as CSV).
 - Accounts and data are in **Supabase**: Postgres with Row Level Security, so each seller only ever sees their own data.
 
-Stack: React 19, TypeScript, Vite, Tailwind (same look as the landing page), Supabase, Gemini API, @react-pdf/renderer, and a Vercel serverless function.
+Stack: React 19, TypeScript, Vite, Tailwind (same look as the landing page), Supabase, Gemini API, Razorpay, @react-pdf/renderer, hosted on Cloudflare Pages (static site plus two Pages Functions: `functions/api/parse.ts` and `functions/api/billing.ts`).
 
 ---
 
@@ -25,9 +25,9 @@ Stack: React 19, TypeScript, Vite, Tailwind (same look as the landing page), Sup
    - **For the pilot, turn off "Confirm email".** Supabase's built-in email service only sends to members of your Supabase team, at about 2 emails an hour, so sellers wouldn't receive confirmation emails.
    - To get confirmation and "Forgot password" emails working for everyone, set up custom SMTP under **Authentication > Emails > SMTP Settings** (for example Resend or Brevo, both of which have free plans). You can then turn "Confirm email" back on.
 4. Open **Authentication > URL Configuration**:
-   - **Site URL**: your app's address once it's on Vercel (step 3), e.g. `https://parchi-app.vercel.app`
-   - **Redirect URLs**: add `https://parchi-app.vercel.app/**`
-5. Open **Project Settings > API Keys** (on older dashboards, **Settings > API**). Copy the **Project URL** and the **Publishable key**; the legacy "anon" key also works. Both are safe to use in the browser. **Never** use the secret or service_role key in this app.
+   - **Site URL**: your domain, e.g. `https://yourdomain.com` (step 3)
+   - **Redirect URLs**: add `https://yourdomain.com/**`
+5. Open **Project Settings > API Keys** (on older dashboards, **Settings > API**). Copy the **Project URL** and the **Publishable key**; both are safe in the browser. The **secret key** (`sb_secret_...`) is only ever set as a server secret for payments (section 5), never in a `VITE_` variable.
 
 ## 2. Get a Gemini API key (2 minutes)
 
@@ -35,27 +35,23 @@ Stack: React 19, TypeScript, Vite, Tailwind (same look as the landing page), Sup
 2. **Before real sellers use it, turn on billing for that Google Cloud project.** On the free tier, Google may use what you send to improve its products. Here that means your sellers' customers' names and addresses. On the paid tier, it doesn't. Each order costs a fraction of a rupee, but check the current [pricing](https://ai.google.dev/gemini-api/docs/pricing).
 3. The app uses `gemini-3.8-flash` by default. To use a different model, set `GEMINI_MODEL` (for example `gemini-3.5-flash-lite`, which is cheaper).
 
-## 3. Deploy to Vercel
+## 3. Host on Cloudflare Pages (free) with your own domain
 
-1. Push this folder to a new GitHub repository. `.env*` files are ignored, so no keys get uploaded.
-   ```bash
-   git init && git add . && git commit -m "Parchi app"
-   git branch -M main
-   git remote add origin https://github.com/<you>/parchi-app.git
-   git push -u origin main
-   ```
-2. On [vercel.com/new](https://vercel.com/new), import the repository. Vercel detects Vite; the settings are also in `vercel.json`.
-3. Before clicking Deploy, open **Environment Variables** and add:
+Cloudflare's free plan has no non-commercial restriction (Vercel's free Hobby plan does). Static pages are free and unlimited; the two server functions get 100,000 requests a day and 10 ms of CPU per request free (Parchi's functions use about 1 to 7 ms). Card and UPI details are entered in Razorpay's own checkout window, never on this site.
 
-   | Name | Value |
-   |---|---|
-   | `VITE_SUPABASE_URL` | Project URL from Supabase |
-   | `VITE_SUPABASE_PUBLISHABLE_KEY` | Publishable key from Supabase |
-   | `GEMINI_API_KEY` | Your Gemini key (no `VITE_` in front of this one) |
+1. **Domain.** In the Cloudflare dashboard, open **Domain Registration > Register Domains**, search for a name and buy it. Cloudflare sells at cost with no markup, and its DNS and SSL are set up automatically.
+2. **Connect GitHub.** **Workers & Pages > Create > Pages > Connect to Git**, pick the repository, then:
+   - Production branch: `main`
+   - Framework preset: **None**
+   - Build command: `npm run build`
+   - Build output directory: `dist`
+   - Root directory: the folder that holds `package.json` (e.g. `parchi-app`)
+3. **Variables** (Settings > Variables and Secrets, for Production). Add as **Text**: `NODE_VERSION` = `22`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`. Add as **Secret**: `GEMINI_API_KEY` (and the payment ones in section 5).
+4. **Deploy.** The site appears at `https://<project>.pages.dev`.
+5. **Custom domain.** Project > **Custom domains > Set up a custom domain**: add `yourdomain.com`, then also `www.yourdomain.com` (the app sends www. visitors to the address without it, so sign-ins stay in one place).
+6. Put `https://yourdomain.com` in Supabase's **Site URL** and **Redirect URLs** (step 1.4).
 
-4. Click **Deploy**. Then put the deployed address into Supabase's **Site URL** and **Redirect URLs** (step 1.4).
-
-If you change an environment variable later, redeploy (**Deployments > ⋯ > Redeploy**). `VITE_` values are baked in when the app is built.
+`VITE_` values are baked in when the site is built, so after changing one, redeploy (**Deployments > ⋯ > Retry deployment**). Secrets take effect on the next deployment too.
 
 ## 4. First live check (please do this before inviting sellers)
 
@@ -73,11 +69,36 @@ These are the parts that could only be tested against stand-ins here, because Su
    ```
    Expected result: customer Rohini Sharma, phone +91 98765 43210, Delhi, Kurta × 2 (Blue, M) and Dupatta × 1 (White), total **₹3,197.00** with CGST and SGST ₹76.12 each. Add ₹99 delivery and the total becomes ₹3,296.00.
    - "Order reading isn't set up yet": `GEMINI_API_KEY` is missing. Add it and redeploy.
+   - Before this works, give yourself a pass (section 5, step 3): without one, Parchi asks you to choose a plan.
    - "The Gemini model isn't available": set `GEMINI_MODEL` to a model listed in AI Studio.
 4. **Issue** the invoice. It should become `INV/26-27/0001`. Tap **Send on WhatsApp** on your phone; the share sheet should offer WhatsApp with the PDF attached.
 5. Paste **10 to 20 of the real order messages you collected** and note anything Parchi gets wrong. Those notes are what will improve the instructions in `api/parse.ts` (`SYSTEM_PROMPT`).
 
-## 5. Run on your computer (optional)
+## 5. Start selling: plans and Razorpay
+
+Sellers pay for a 30-day pass before they can make invoices: **Starter ₹249** (100 invoices), **Growth ₹349** (250) or **Pro ₹499** (500). Nothing renews automatically and passes aren't refundable once started. The landing page is at `/`; the pages Razorpay checks are `/pricing`, `/terms`, `/privacy`, `/refunds`, `/shipping` and `/contact`.
+
+1. **Business details** are in `src/landing/company.ts`. A test fails if a required one is empty.
+2. **Database.** In Supabase > SQL Editor, run `supabase/migrations/20261016000000_parchi_billing.sql` (after the first file). It's safe to run more than once.
+3. **Your own free pass**, so you can keep using the app. In the SQL Editor:
+   ```sql
+   select public.billing_grant_pass('your-login-email@example.com', 'pro', 365);
+   ```
+4. **Supabase secret key.** Supabase > Project Settings > API Keys > Secret keys: create one and copy it (`sb_secret_...`). In Cloudflare add it as a **Secret** named `SUPABASE_SECRET_KEY`.
+5. **Razorpay test keys.** In the Razorpay dashboard with **Test Mode** on: Account & Settings > API Keys > Generate Key. In Cloudflare add **Secrets** `RAZORPAY_KEY_ID` (`rzp_test_...`) and `RAZORPAY_KEY_SECRET`.
+6. **Webhook** (records a payment even if the seller closes the page before it finishes). Razorpay > Account & Settings > Webhooks > Add New Webhook:
+   - URL: `https://yourdomain.com/api/billing?action=webhook`
+   - Secret: a long random password of your own; add the same value in Cloudflare as the **Secret** `RAZORPAY_WEBHOOK_SECRET`
+   - Events: `payment.captured` and `order.paid`
+7. **Redeploy**, then buy a plan with a new test account using one of Razorpay's test cards. No real money moves in Test Mode.
+8. **Go live.** Complete Razorpay's activation (KYC and website details). Then switch to Live Mode, generate live keys, replace `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` in Cloudflare, add the webhook again in Live Mode with the same URL and secret, and redeploy.
+
+Notes:
+- **Prices** live in three places that must match: `billing_plan` in the SQL file (what's enforced), `PLANS` in `api/billing.ts`, and `src/lib/plans.ts` (what's shown).
+- **Payment problems** (charged twice, or charged without a pass) are refunded from the Razorpay dashboard.
+- `GEMINI_API_BASE` and `RAZORPAY_API_BASE` exist only for automated tests. Never set them in Cloudflare.
+
+## 6. Run on your computer (optional)
 
 Needs Node.js 20.19+ (`node -v`).
 
@@ -85,7 +106,7 @@ Needs Node.js 20.19+ (`node -v`).
 npm install
 cp .env.example .env.local      # fill in the three values
 npm run dev                     # http://localhost:5173 (also serves /api/parse locally)
-npm test                        # 51 unit tests: GST maths, GSTIN, parsing, PDF
+npm test                        # unit tests: GST maths, GSTIN, parsing, PDF, payments
 npm run build                   # type-check and build
 ```
 

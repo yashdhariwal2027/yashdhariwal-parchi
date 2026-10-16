@@ -20,6 +20,8 @@ const KNOWN: Record<string, string> = {
   invoices_must_start_as_draft: "Couldn't save the invoice. Please try again.",
   invoice_not_found: "This invoice doesn't exist or isn't yours.",
   not_signed_in: "Your session has ended. Please sign in again.",
+  plan_required: "You need an active plan to issue invoices. Choose one on the Plan page.",
+  plan_invoice_limit: "You've used all the invoices in your current plan. Buy a new pass on the Plan page; it starts straight away.",
 };
 
 export interface DbError {

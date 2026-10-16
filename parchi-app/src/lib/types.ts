@@ -63,6 +63,10 @@ export interface DraftLine {
   discount: number;
   gstRate: number;
   rateRule: RateRule;
+  /** false until the seller picks a GST rate for an item that isn't from their products (missing = chosen, for older drafts) */
+  rateSet?: boolean;
+  /** Seller ticked "Save to my products" on an item that isn't in their products */
+  saveAsProduct?: boolean;
   checks: CheckFlag[];
 }
 
@@ -96,6 +100,10 @@ export interface StoredLine {
   discount: number;
   gst_rate: number;
   rate_rule: RateRule;
+  /** Only stored on drafts: false while the GST rate hasn't been chosen */
+  rate_set?: boolean;
+  /** Only stored on drafts: "Save to my products" is ticked */
+  save_product?: boolean;
   rate: number;
   gross_p: number;
   taxable_p: number;

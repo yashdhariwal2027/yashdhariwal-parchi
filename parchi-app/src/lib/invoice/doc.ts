@@ -215,7 +215,8 @@ export function buildDoc(row: InvoiceRow, biz: Business): DocModel {
     totals,
     grandTotal: f(t.grand_total_p),
     grandTotalPaise: t.grand_total_p,
-    amountInWords: t.amount_in_words,
+    // A non-breaking space keeps "Only" with the word before it, so it never sits alone on a line.
+    amountInWords: (t.amount_in_words ?? "").replace(/ (\S+)$/, "\u00a0$1"),
     payment: row.payment_mode ? PAYMENT_LABELS[row.payment_mode] : null,
     paid,
     upi,

@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from "react-router";
-import { FilePlus2, Package, ReceiptText, Settings } from "lucide-react";
+import { FilePlus2, Package, ReceiptText, Settings, Wallet } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
 import { Wordmark } from "./ui";
@@ -8,6 +8,7 @@ const NAV = [
   { to: "/", label: "New invoice", short: "New", icon: FilePlus2, end: true },
   { to: "/invoices", label: "Invoices", short: "Invoices", icon: ReceiptText, end: false },
   { to: "/products", label: "Products", short: "Products", icon: Package, end: false },
+  { to: "/plan", label: "Plan", short: "Plan", icon: Wallet, end: false },
   { to: "/settings", label: "Settings", short: "Settings", icon: Settings, end: false },
 ];
 
@@ -57,7 +58,7 @@ export function Layout() {
         aria-label="Main"
         className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface pb-[env(safe-area-inset-bottom)] md:hidden"
       >
-        <ul className="grid grid-cols-4">
+        <ul className="grid grid-cols-5">
           {NAV.map(({ to, short, icon: Icon, end }) => (
             <li key={to}>
               <NavLink

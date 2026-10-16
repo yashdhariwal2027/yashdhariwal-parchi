@@ -90,6 +90,29 @@ export function findState(text: string | null | undefined): GstState | undefined
   return undefined;
 }
 
+/**
+ * The state an address points to, from its PIN code or else from a state or city name in it
+ * ("Udyog Vihar, Gurgaon" -> Haryana). Only a hint for a "does this match?" warning; undefined if unclear.
+ */
+export function stateHintFromAddress(address: string | null | undefined, pin?: string | null): { state: GstState; word: string; from: "pin" | "place" } | undefined {
+  const pinCode = (pin && /^[1-9]\d{5}$/.test(pin) ? pin : undefined) ?? (address ?? "").match(/(?<!\d)[1-9]\d{5}(?!\d)/)?.[0];
+  const byPin = stateFromPin(pinCode);
+  if (byPin && pinCode) return { state: byPin, word: pinCode, from: "pin" };
+  const t = ` ${norm(address ?? "")} `;
+  if (!t.trim()) return undefined;
+  const found = new Map<string, { state: GstState; word: string }>();
+  for (const s of STATES) {
+    // Short abbreviations ("up", "mp") are too easily part of an address, so only names of 4+ letters count.
+    for (const w of [s.name, ...(s.aliases ?? [])]) {
+      const n = norm(w);
+      if (n.length >= 4 && t.includes(` ${n} `) && !found.has(s.code)) found.set(s.code, { state: s, word: w });
+    }
+  }
+  if (found.size !== 1) return undefined;
+  const only = [...found.values()][0];
+  return { ...only, from: "place" };
+}
+
 /*
  * PIN code to state, by the first three digits. Ranges follow India Post's postal circles.
  * Used only as a hint: the seller always confirms the state before issuing.

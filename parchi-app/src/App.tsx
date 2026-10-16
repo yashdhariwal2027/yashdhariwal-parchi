@@ -11,6 +11,24 @@ import { InvoiceView } from "@/pages/InvoiceView";
 import { Products } from "@/pages/Products";
 import { Settings } from "@/pages/Settings";
 import { ResetPassword } from "@/pages/ResetPassword";
+import { PlanPage, RequirePlan } from "@/pages/Plan";
+import { BillingProvider } from "@/lib/billing";
+import { Landing } from "@/landing/Landing";
+import { Contact, PricingPage, Privacy, Refunds, Shipping, Terms } from "@/landing/Policies";
+
+/** Public pages, open to everyone (Razorpay requires them). */
+const POLICY_ROUTES = [
+  { path: "/terms", element: <Terms /> },
+  { path: "/privacy", element: <Privacy /> },
+  { path: "/refunds", element: <Refunds /> },
+  { path: "/shipping", element: <Shipping /> },
+  { path: "/delivery", element: <Navigate to="/shipping" replace /> },
+  { path: "/contact", element: <Contact /> },
+  { path: "/pricing", element: <PricingPage /> },
+];
+
+/** App pages: a signed-out visitor opening one of these is asked to sign in. */
+const APP_PATHS = ["/invoices/*", "/drafts/*", "/products", "/settings", "/plan", "/reset-password"];
 
 export default function App() {
   if (!isConfigured) return <SetupNeeded />;
@@ -33,8 +51,15 @@ function Gate() {
   if (!session) {
     return (
       <Routes>
+        <Route path="/" element={<Landing />} />
         <Route path="/signin" element={<SignIn />} />
-        <Route path="*" element={<Navigate to="/signin" replace />} />
+        {POLICY_ROUTES.map((r) => (
+          <Route key={r.path} path={r.path} element={r.element} />
+        ))}
+        {APP_PATHS.map((p) => (
+          <Route key={p} path={p} element={<Navigate to="/signin" replace />} />
+        ))}
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     );
   }
@@ -56,12 +81,36 @@ function Gate() {
   return (
     <Routes>
       <Route path="/reset-password" element={<ResetPassword />} />
+      {POLICY_ROUTES.map((r) => (
+        <Route key={r.path} path={r.path} element={r.element} />
+      ))}
       {business === null ? (
         <Route path="*" element={<Onboarding />} />
       ) : (
-        <Route element={<Layout />}>
-          <Route index element={<NewInvoice />} />
-          <Route path="drafts/:id" element={<NewInvoice />} />
+        <Route
+          element={
+            <BillingProvider>
+              <Layout />
+            </BillingProvider>
+          }
+        >
+          <Route
+            index
+            element={
+              <RequirePlan>
+                <NewInvoice />
+              </RequirePlan>
+            }
+          />
+          <Route
+            path="drafts/:id"
+            element={
+              <RequirePlan>
+                <NewInvoice />
+              </RequirePlan>
+            }
+          />
+          <Route path="plan" element={<PlanPage />} />
           <Route path="invoices" element={<Invoices />} />
           <Route path="invoices/:id" element={<InvoiceView />} />
           <Route path="products" element={<Products />} />
