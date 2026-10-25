@@ -13,7 +13,7 @@ Paste a customer's WhatsApp or Instagram order message, and Parchi turns it into
 - Also included: UPI scan-to-pay QR, paid/unpaid tracking, and CA exports (invoice register and HSN summary as CSV).
 - Accounts and data are in **Supabase**: Postgres with Row Level Security, so each seller only ever sees their own data.
 
-Stack: React 19, TypeScript, Vite, Tailwind (same look as the landing page), Supabase, Gemini API, Razorpay, @react-pdf/renderer, hosted on Cloudflare Pages (static site plus two Pages Functions: `functions/api/parse.ts` and `functions/api/billing.ts`).
+Stack: React 19, TypeScript, Vite, Tailwind (same look as the landing page), Supabase, Gemini API, Dodo Payments, @react-pdf/renderer, hosted on Cloudflare Pages (static site plus two Pages Functions: `functions/api/parse.ts` and `functions/api/billing.ts`).
 
 ---
 
@@ -37,7 +37,7 @@ Stack: React 19, TypeScript, Vite, Tailwind (same look as the landing page), Sup
 
 ## 3. Host on Cloudflare Pages (free) with your own domain
 
-Cloudflare's free plan has no non-commercial restriction (Vercel's free Hobby plan does). Static pages are free and unlimited; the two server functions get 100,000 requests a day and 10 ms of CPU per request free (Parchi's functions use about 1 to 7 ms). Card and UPI details are entered in Razorpay's own checkout window, never on this site.
+Cloudflare's free plan has no non-commercial restriction (Vercel's free Hobby plan does). Static pages are free and unlimited; the two server functions get 100,000 requests a day and 10 ms of CPU per request free (Parchi's functions use about 1 to 7 ms). Card and UPI details are entered on Dodo Payments' own checkout page, never on this site.
 
 1. **Domain.** In the Cloudflare dashboard, open **Domain Registration > Register Domains**, search for a name and buy it. Cloudflare sells at cost with no markup, and its DNS and SSL are set up automatically.
 2. **Connect GitHub.** **Workers & Pages > Create > Pages > Connect to Git**, pick the repository, then:
@@ -74,29 +74,23 @@ These are the parts that could only be tested against stand-ins here, because Su
 4. **Issue** the invoice. It should become `INV/26-27/0001`. Tap **Send on WhatsApp** on your phone; the share sheet should offer WhatsApp with the PDF attached.
 5. Paste **10 to 20 of the real order messages you collected** and note anything Parchi gets wrong. Those notes are what will improve the instructions in `api/parse.ts` (`SYSTEM_PROMPT`).
 
-## 5. Start selling: plans and Razorpay
+## 5. Start selling: plans and Dodo Payments
 
-Sellers pay for a 30-day pass before they can make invoices: **Starter ₹249** (100 invoices), **Growth ₹349** (250) or **Pro ₹499** (500). Nothing renews automatically and passes aren't refundable once started. The landing page is at `/`; the pages Razorpay checks are `/pricing`, `/terms`, `/privacy`, `/refunds`, `/shipping` and `/contact`.
+Sellers pay for a 30-day pass before they can make invoices: **Starter ₹249** (100 invoices), **Growth ₹349** (250) or **Pro ₹499** (500), GST included. Nothing renews automatically and passes aren't refundable once started. Dodo Payments is the merchant of record: it collects the payment, charges the GST inside the price and issues the buyer's tax invoice. The pages Dodo may check are `/pricing`, `/terms`, `/privacy`, `/refunds`, `/shipping` and `/contact`.
 
 1. **Business details** are in `src/landing/company.ts`. A test fails if a required one is empty.
-2. **Database.** In Supabase > SQL Editor, run `supabase/migrations/20261016000000_parchi_billing.sql` (after the first file). It's safe to run more than once.
-3. **Your own free pass**, so you can keep using the app. In the SQL Editor:
-   ```sql
-   select public.billing_grant_pass('your-login-email@example.com', 'pro', 365);
-   ```
-4. **Supabase secret key.** Supabase > Project Settings > API Keys > Secret keys: create one and copy it (`sb_secret_...`). In Cloudflare add it as a **Secret** named `SUPABASE_SECRET_KEY`.
-5. **Razorpay test keys.** In the Razorpay dashboard with **Test Mode** on: Account & Settings > API Keys > Generate Key. In Cloudflare add **Secrets** `RAZORPAY_KEY_ID` (`rzp_test_...`) and `RAZORPAY_KEY_SECRET`.
-6. **Webhook** (records a payment even if the seller closes the page before it finishes). Razorpay > Account & Settings > Webhooks > Add New Webhook:
-   - URL: `https://yourdomain.com/api/billing?action=webhook`
-   - Secret: a long random password of your own; add the same value in Cloudflare as the **Secret** `RAZORPAY_WEBHOOK_SECRET`
-   - Events: `payment.captured` and `order.paid`
-7. **Redeploy**, then buy a plan with a new test account using one of Razorpay's test cards. No real money moves in Test Mode.
-8. **Go live.** Complete Razorpay's activation (KYC and website details). Then switch to Live Mode, generate live keys, replace `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` in Cloudflare, add the webhook again in Live Mode with the same URL and secret, and redeploy.
+2. **Database.** Already set up by `supabase/migrations/20261016000000_parchi_billing.sql`. Nothing new to run for Dodo.
+3. **Products in Dodo** (Test Mode first): create three **one-time** products priced in **INR** with **Tax Inclusive Pricing** on: Starter 249, Growth 349, Pro 499. Copy each product ID (`pdt_...`).
+4. **API key**: Dodo > Developer > API Keys.
+5. **Webhook**: Dodo > Developer > Webhooks > Add endpoint, URL `https://yourdomain.com/api/billing?action=webhook`, event `payment.succeeded`. Copy the signing secret (`whsec_...`).
+6. **Cloudflare variables**: Secrets `DODO_API_KEY`, `DODO_WEBHOOK_SECRET`; Text `DODO_MODE` = `test`, `DODO_PRODUCT_STARTER`, `DODO_PRODUCT_GROWTH`, `DODO_PRODUCT_PRO`. Plus `SUPABASE_SECRET_KEY` (Secret) if not already there. Redeploy.
+7. **Test** with a new account and Dodo's test card.
+8. **Go live** once Dodo approves the account: redo steps 3 to 5 in Live Mode, replace the five Dodo values in Cloudflare, set `DODO_MODE` = `live`, redeploy.
 
 Notes:
 - **Prices** live in three places that must match: `billing_plan` in the SQL file (what's enforced), `PLANS` in `api/billing.ts`, and `src/lib/plans.ts` (what's shown).
-- **Payment problems** (charged twice, or charged without a pass) are refunded from the Razorpay dashboard.
-- `GEMINI_API_BASE` and `RAZORPAY_API_BASE` exist only for automated tests. Never set them in Cloudflare.
+- **Payment problems** (charged twice, or charged without a pass) are refunded from the Dodo dashboard.
+- `GEMINI_API_BASE` and `DODO_API_BASE` exist only for automated tests. Never set them in Cloudflare.
 
 ## 6. Run on your computer (optional)
 

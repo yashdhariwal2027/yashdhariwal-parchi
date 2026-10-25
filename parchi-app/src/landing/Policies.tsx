@@ -68,14 +68,13 @@ export function Terms() {
       <S title="Plans and payment">
         <p>
           Parchi is sold as 30-day passes: {PLANS.map((p) => `${p.name} at ₹${p.price} (${p.invoices} invoices, ${p.reads} AI order reads)`).join(", ")}.
-          You pay in advance through Razorpay. A pass is not renewed or charged automatically. Unused invoices and reads don't carry over to the next
+          You pay in advance through our payment partner, Dodo Payments. A pass is not renewed or charged automatically. Unused invoices and reads don't carry over to the next
           pass. If you buy a pass while your current one still has invoices left, the new pass starts when the current one ends. If your current pass is
           used up, the new one starts straight away.
         </p>
         <p>
-          {COMPANY.gstin
-            ? `Prices include GST. Our GSTIN is ${COMPANY.gstin}.`
-            : "Prices are final. We are not registered for GST, so no GST is charged on them."}{" "}
+          Prices include GST. Dodo Payments acts as the merchant of record: it sells the pass to you on our behalf, collects the payment,
+          charges the GST included in the price and issues your tax invoice.{" "}
           We may change prices for future passes; a pass you've already paid for keeps its price and limits. Refunds are covered in our{" "}
           <Link to="/refunds" className="underline">
             Refund and Cancellation Policy
@@ -153,8 +152,8 @@ export function Privacy() {
           messages you paste.
         </p>
         <p>
-          <strong>Payments:</strong> the plan you bought, the amount, dates and Razorpay's payment reference. Card, UPI and bank details are handled by
-          Razorpay; we never see or store them.
+          <strong>Payments:</strong> the plan you bought, the amount, dates and Dodo Payments' payment reference. Card, UPI and bank details are handled by
+          Dodo Payments; we never see or store them.
         </p>
       </S>
       <S title="How we use it">
@@ -168,7 +167,7 @@ export function Privacy() {
       </S>
       <S title="Who processes your data for us">
         <p>
-          Supabase (database and sign-in), Vercel (hosting), Google (AI order reading) and Razorpay (payments). They process data only to provide their
+          Supabase (database and sign-in), Cloudflare (hosting), Google (AI order reading) and Dodo Payments (payments and tax invoices for your plan). They process data only to provide their
           service to us. Their servers may be outside India.
         </p>
       </S>
@@ -234,12 +233,12 @@ export function Refunds() {
       </S>
       <S title="How refunds are paid">
         <p>
-          To the same card, UPI account or bank account you paid from, through Razorpay. Refunds are started within 2 working days of us confirming the
+          To the same card or UPI account you paid from, through Dodo Payments. Refunds are started within 2 working days of us confirming the
           problem and usually reach you in 5 to 7 working days, depending on your bank.
         </p>
       </S>
       <S title="How to reach us">
-        <p>Write to {co("email")} with your account email and the Razorpay payment ID (shown on the Plan page).</p>
+        <p>Write to {co("email")} with your account email and the payment ID (shown on the Plan page).</p>
       </S>
     </Page>
   );
@@ -256,7 +255,7 @@ export function Shipping() {
   );
 }
 
-/** The plans on a page of their own (Razorpay's website check asks for a pricing page). */
+/** The plans on a page of their own (the payment provider's website check asks for a pricing page). */
 export function PricingPage() {
   useEffect(() => {
     document.title = "Pricing · Parchi";

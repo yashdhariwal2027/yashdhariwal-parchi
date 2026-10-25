@@ -121,7 +121,8 @@ const SELLER_GSTIN = "07AAPFU0939F1Z" + gstinCheckChar("07AAPFU0939F1Z");
 const B = biz({ gstin: SELLER_GSTIN });
 
 function ready(): Draft {
-  return draftFromParsed(order(), MESSAGE, products);
+  // Pinned to the same "today" the checks below use, so these tests don't depend on the real date.
+  return { ...draftFromParsed(order(), MESSAGE, products), issueDate: "2026-10-15" };
 }
 
 const codes = (d: Draft, b: Business) => checkDraft(d, b, calcDraft(d, b), "2026-10-15").map((i) => `${i.level}:${i.code}`);

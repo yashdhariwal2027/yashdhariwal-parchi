@@ -1,42 +1,50 @@
 /*
- * /api/billing: paying for a Parchi plan with Razorpay.
+ * /api/billing: paying for a Parchi plan with Dodo Payments.
  *
- *   POST /api/billing?action=order    { plan }                  signed-in seller  -> Razorpay order for checkout
- *   POST /api/billing?action=verify   { razorpay_order_id, razorpay_payment_id, razorpay_signature }
- *                                                               signed-in seller  -> checks the payment, starts the pass
- *   POST /api/billing?action=webhook  (raw body from Razorpay)  Razorpay          -> same, in case the browser closed
+ *   POST /api/billing?action=order    { plan }          signed-in seller -> a Dodo checkout page to send them to
+ *   POST /api/billing?action=verify   { payment_id }    signed-in seller -> back from checkout: checks the payment, starts the pass
+ *   POST /api/billing?action=webhook  (from Dodo)       Dodo             -> same, in case the seller closed the page
  *
- * The pass is recorded only after the payment is proven: a signature made with your Razorpay secret, then a
- * check with Razorpay's API that the payment is captured for the right order and amount. The database
- * function billing_record_payment is safe to call twice, so the checkout and the webhook can both report it.
+ * A pass is recorded only after Dodo's own API confirms the payment succeeded, in INR, for a checkout this app
+ * created, for the right amount. The database function billing_record_payment is safe to call twice, so the
+ * return page and the webhook can both report the same payment.
  *
- * Environment variables (Vercel > Settings > Environment Variables):
- *   RAZORPAY_KEY_ID           rzp_test_... while testing, rzp_live_... once your account is activated
- *   RAZORPAY_KEY_SECRET       from the same screen as the key ID. Never prefix with VITE_.
- *   RAZORPAY_WEBHOOK_SECRET   the secret you type when adding the webhook in the Razorpay dashboard
- *   SUPABASE_SECRET_KEY       sb_secret_... from Supabase > Project Settings > API Keys. Never prefix with VITE_.
+ * Database note: the billing_passes columns are still called razorpay_order_id / razorpay_payment_id (they were
+ * created for Razorpay). They now hold the Dodo checkout session ID (cks_...) and payment ID (pay_...).
+ * Renaming them would need a database change, so they keep their names.
+ *
+ * Environment variables (Cloudflare Pages > Settings > Variables and secrets):
+ *   DODO_API_KEY              API key from Dodo > Developer > API Keys (Secret)
+ *   DODO_WEBHOOK_SECRET       whsec_... from Dodo > Developer > Webhooks > your endpoint (Secret)
+ *   DODO_MODE                 "test" while testing, "live" once your Dodo account is approved (Text)
+ *   DODO_PRODUCT_STARTER, DODO_PRODUCT_GROWTH, DODO_PRODUCT_PRO   product IDs (pdt_...) from Dodo > Products (Text)
+ *   SUPABASE_SECRET_KEY       sb_secret_... Never prefix with VITE_.
  *   VITE_SUPABASE_URL, VITE_SUPABASE_PUBLISHABLE_KEY   the same values the app uses
  *
- * Runs on Cloudflare Pages through functions/api/billing.ts (which passes the environment in). The default
- * export at the bottom is for Vercel. This file deliberately has no local imports so it builds on its own.
+ * Runs on Cloudflare Pages through functions/api/billing.ts. This file has no local imports so it builds on its own.
  */
 
 export const PLANS = {
-  starter: { name: "Starter", amount: 24900 },
-  growth: { name: "Growth", amount: 34900 },
-  pro: { name: "Pro", amount: 49900 },
+  starter: { name: "Starter", amount: 24900, productVar: "DODO_PRODUCT_STARTER" },
+  growth: { name: "Growth", amount: 34900, productVar: "DODO_PRODUCT_GROWTH" },
+  pro: { name: "Pro", amount: 49900, productVar: "DODO_PRODUCT_PRO" },
 } as const;
 export type PlanId = keyof typeof PLANS;
 
-const RAZORPAY_API = "https://api.razorpay.com/v1";
+const DODO_API = { test: "https://test.dodopayments.com", live: "https://live.dodopayments.com" } as const;
 const MAX_BODY = 64_000;
+/** Webhooks older or newer than this are refused (replay protection, as in the Standard Webhooks spec). */
+const WEBHOOK_TOLERANCE_S = 5 * 60;
 
-interface Env {
-  /** Only for automated tests: send Razorpay API calls to a stand-in server. Leave unset in production. */
-  RAZORPAY_API_BASE?: string;
-  RAZORPAY_KEY_ID?: string;
-  RAZORPAY_KEY_SECRET?: string;
-  RAZORPAY_WEBHOOK_SECRET?: string;
+export interface Env {
+  /** Only for automated tests: send Dodo API calls to a stand-in server. Leave unset in production. */
+  DODO_API_BASE?: string;
+  DODO_API_KEY?: string;
+  DODO_WEBHOOK_SECRET?: string;
+  DODO_MODE?: string;
+  DODO_PRODUCT_STARTER?: string;
+  DODO_PRODUCT_GROWTH?: string;
+  DODO_PRODUCT_PRO?: string;
   SUPABASE_SECRET_KEY?: string;
   VITE_SUPABASE_URL?: string;
   VITE_SUPABASE_PUBLISHABLE_KEY?: string;
@@ -58,14 +66,20 @@ function fail(status: number, error: string, message: string): Response {
 const NOT_SET_UP = () => fail(503, "not_configured", "Payments aren't set up yet. Please try again later.");
 
 // ---------------------------------------------------------------------------------------------
-// Signatures (HMAC-SHA256, hex), compared in constant time
+// Webhook signatures (Standard Webhooks: HMAC-SHA256 of "id.timestamp.body", base64), constant-time compare
 // ---------------------------------------------------------------------------------------------
 
-export async function hmacHex(secret: string, message: string): Promise<string> {
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(message)));
-  return Array.from(sig, (b) => b.toString(16).padStart(2, "0")).join("");
+function b64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
+  const bin = atob(b64);
+  const out = new Uint8Array(new ArrayBuffer(bin.length));
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function bytesToB64(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
 }
 
 export function safeEqual(a: string, b: string): boolean {
@@ -73,6 +87,35 @@ export function safeEqual(a: string, b: string): boolean {
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
+}
+
+/** The base64 signature Dodo puts after "v1," for this message. */
+export async function webhookSignature(secret: string, id: string, timestamp: string, body: string): Promise<string> {
+  const keyBytes = b64ToBytes(secret.startsWith("whsec_") ? secret.slice(6) : secret);
+  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${id}.${timestamp}.${body}`));
+  return bytesToB64(new Uint8Array(sig));
+}
+
+export async function verifyWebhook(secret: string, headers: Headers, body: string, nowS = Math.floor(Date.now() / 1000)): Promise<boolean> {
+  const id = headers.get("webhook-id") ?? "";
+  const ts = headers.get("webhook-timestamp") ?? "";
+  const sigHeader = headers.get("webhook-signature") ?? "";
+  if (!id || !/^\d{1,12}$/.test(ts) || !sigHeader) return false;
+  if (Math.abs(nowS - Number(ts)) > WEBHOOK_TOLERANCE_S) return false;
+  let expected: string;
+  try {
+    expected = await webhookSignature(secret, id, ts, body);
+  } catch {
+    return false; // secret isn't valid base64
+  }
+  return sigHeader
+    .split(" ")
+    .filter(Boolean)
+    .some((part) => {
+      const [version, sig] = part.split(",", 2);
+      return version === "v1" && typeof sig === "string" && safeEqual(sig, expected);
+    });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -126,45 +169,39 @@ async function rpc<T>(env: Env, f: Fetch, fn: string, args: Record<string, unkno
 }
 
 // ---------------------------------------------------------------------------------------------
-// Razorpay API
+// Dodo API
 // ---------------------------------------------------------------------------------------------
 
-function razorpayAuth(env: Env): string {
-  return "Basic " + btoa(`${env.RAZORPAY_KEY_ID}:${env.RAZORPAY_KEY_SECRET}`);
+function dodoBase(env: Env): string {
+  if (env.DODO_API_BASE) return env.DODO_API_BASE.replace(/\/+$/, "");
+  return env.DODO_MODE === "live" ? DODO_API.live : DODO_API.test;
 }
 
-async function razorpay<T>(env: Env, f: Fetch, path: string, body?: unknown): Promise<T> {
-  const res = await f(`${(env.RAZORPAY_API_BASE || RAZORPAY_API).replace(/\/+$/, "")}${path}`, {
+async function dodo<T>(env: Env, f: Fetch, path: string, body?: unknown): Promise<T> {
+  const res = await f(`${dodoBase(env)}${path}`, {
     method: body === undefined ? "GET" : "POST",
-    headers: { authorization: razorpayAuth(env), "content-type": "application/json" },
+    headers: { authorization: `Bearer ${env.DODO_API_KEY}`, "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(20_000),
   });
   const text = await res.text();
   if (!res.ok) {
-    console.error("Razorpay error", path.replace(/pay_[A-Za-z0-9]+/, "pay_…"), res.status, text.slice(0, 500));
-    throw new Error(`razorpay_${res.status}`);
+    console.error("Dodo error", path.replace(/pay_[A-Za-z0-9]+/, "pay_…"), res.status, text.slice(0, 500));
+    throw new Error(`dodo_${res.status}`);
   }
   return JSON.parse(text) as T;
 }
 
-interface RazorpayPayment {
-  id: string;
-  order_id: string | null;
-  amount: number;
+interface DodoPayment {
+  payment_id: string;
+  status: string | null;
+  total_amount: number;
   currency: string;
-  status: "created" | "authorized" | "captured" | "refunded" | "failed";
+  checkout_session_id?: string | null;
+  metadata?: Record<string, string> | null;
 }
 
-/** Makes sure the payment is captured for this order, capturing it if it was only authorised. */
-async function confirmPayment(env: Env, f: Fetch, orderId: string, paymentId: string): Promise<RazorpayPayment | null> {
-  let p = await razorpay<RazorpayPayment>(env, f, `/payments/${encodeURIComponent(paymentId)}`);
-  if (p.order_id !== orderId || p.currency !== "INR") return null;
-  if (p.status === "authorized") {
-    p = await razorpay<RazorpayPayment>(env, f, `/payments/${encodeURIComponent(paymentId)}/capture`, { amount: p.amount, currency: "INR" });
-  }
-  return p.status === "captured" ? p : null;
-}
+const PAYMENT_ID_RE = /^pay_[A-Za-z0-9]{4,64}$/;
 
 interface PassRow {
   plan: string;
@@ -173,8 +210,12 @@ interface PassRow {
   status: string;
 }
 
-async function record(env: Env, f: Fetch, orderId: string, paymentId: string, amount: number): Promise<PassRow> {
-  return rpc<PassRow>(env, f, "billing_record_payment", { p_order_id: orderId, p_payment_id: paymentId, p_amount_paise: amount });
+async function record(env: Env, f: Fetch, p: DodoPayment): Promise<PassRow> {
+  return rpc<PassRow>(env, f, "billing_record_payment", {
+    p_order_id: p.checkout_session_id,
+    p_payment_id: p.payment_id,
+    p_amount_paise: p.total_amount,
+  });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -192,16 +233,17 @@ async function readJson(request: Request): Promise<Record<string, unknown> | nul
   }
 }
 
-async function createOrder(request: Request, env: Env, f: Fetch): Promise<Response> {
+async function createCheckout(request: Request, env: Env, f: Fetch): Promise<Response> {
   const user = await currentUser(env, request, f);
   if (!user) return fail(401, "not_signed_in", "Your session has ended. Please sign in again.");
   const body = await readJson(request);
   const plan = typeof body?.plan === "string" ? body.plan : "";
   if (!(plan in PLANS)) return fail(400, "unknown_plan", "Choose a plan.");
+  const productId = (env[PLANS[plan as PlanId].productVar] ?? "").trim();
+  if (!productId) return NOT_SET_UP();
 
-  let amount: number;
   try {
-    amount = await rpc<number>(env, f, "billing_quote", { p_user_id: user.id, p_plan: plan });
+    await rpc<number>(env, f, "billing_quote", { p_user_id: user.id, p_plan: plan });
   } catch (e) {
     const msg = (e as Error).message;
     if (msg.includes("pass_already_waiting")) {
@@ -212,92 +254,109 @@ async function createOrder(request: Request, env: Env, f: Fetch): Promise<Respon
     return fail(502, "server_error", "Couldn't start the payment. Please try again.");
   }
 
-  let order: { id: string; amount: number; currency: string };
+  const origin = new URL(request.url).origin;
+  let session: { session_id: string; checkout_url?: string | null };
   try {
-    order = await razorpay(env, f, "/orders", {
-      amount,
-      currency: "INR",
-      receipt: `parchi-${plan}-${Date.now()}`.slice(0, 40),
-      notes: { user_id: user.id, plan },
+    session = await dodo(env, f, "/checkouts", {
+      product_cart: [{ product_id: productId, quantity: 1 }],
+      customer: { email: user.email },
+      billing_address: { country: "IN" },
+      return_url: `${origin}/plan`,
+      cancel_url: `${origin}/plan`,
+      metadata: { user_id: user.id, plan },
+      feature_flags: { allow_discount_code: false, allow_currency_selection: false },
     });
-    if (order.amount !== amount) throw new Error("razorpay_amount");
-    await rpc(env, f, "billing_order_created", { p_user_id: user.id, p_plan: plan, p_order_id: order.id });
+    if (!session?.session_id || !session.checkout_url) throw new Error("dodo_no_checkout_url");
+    await rpc(env, f, "billing_order_created", { p_user_id: user.id, p_plan: plan, p_order_id: session.session_id });
   } catch (e) {
-    console.error("Creating the order failed", String(e).slice(0, 300));
+    console.error("Creating the checkout failed", String(e).slice(0, 300));
     return fail(502, "server_error", "Couldn't start the payment. Please try again.");
   }
 
-  return json({
-    ok: true,
-    keyId: env.RAZORPAY_KEY_ID,
-    orderId: order.id,
-    amount,
-    currency: "INR",
-    plan,
-    planName: PLANS[plan as PlanId].name,
-    email: user.email,
-  });
+  return json({ ok: true, checkoutUrl: session.checkout_url, plan, planName: PLANS[plan as PlanId].name });
+}
+
+/** Checks a payment with Dodo and records the pass. Shared by the return page and the webhook. */
+async function confirmAndRecord(
+  env: Env,
+  f: Fetch,
+  paymentId: string,
+  expectUserId: string | null,
+): Promise<{ kind: "recorded"; pass: PassRow } | { kind: "not_paid"; status: string | null } | { kind: "ignored"; why: string }> {
+  const p = await dodo<DodoPayment>(env, f, `/payments/${encodeURIComponent(paymentId)}`);
+  if (p.payment_id !== paymentId) return { kind: "ignored", why: "payment id mismatch" };
+  if (!p.checkout_session_id) return { kind: "ignored", why: "not from a checkout" };
+  if (expectUserId && p.metadata?.user_id !== expectUserId) return { kind: "ignored", why: "someone else's payment" };
+  if (p.status !== "succeeded") return { kind: "not_paid", status: p.status };
+  if (p.currency !== "INR") return { kind: "ignored", why: "not INR" };
+  return { kind: "recorded", pass: await record(env, f, p) };
 }
 
 async function verifyPayment(request: Request, env: Env, f: Fetch): Promise<Response> {
   const user = await currentUser(env, request, f);
   if (!user) return fail(401, "not_signed_in", "Your session has ended. Please sign in again.");
   const body = await readJson(request);
-  const orderId = typeof body?.razorpay_order_id === "string" ? body.razorpay_order_id : "";
-  const paymentId = typeof body?.razorpay_payment_id === "string" ? body.razorpay_payment_id : "";
-  const signature = typeof body?.razorpay_signature === "string" ? body.razorpay_signature : "";
-  if (!orderId || !paymentId || !signature) return fail(400, "bad_request", "Payment details are missing.");
-
-  const expected = await hmacHex(env.RAZORPAY_KEY_SECRET ?? "", `${orderId}|${paymentId}`);
-  if (!safeEqual(expected, signature)) {
-    console.error("Payment signature didn't match", orderId);
-    return fail(400, "bad_signature", "We couldn't confirm this payment. If money was taken, it will be refunded automatically.");
-  }
+  const paymentId = typeof body?.payment_id === "string" ? body.payment_id : "";
+  if (!PAYMENT_ID_RE.test(paymentId)) return fail(400, "bad_request", "Payment details are missing.");
 
   try {
-    const payment = await confirmPayment(env, f, orderId, paymentId);
-    if (!payment) return fail(402, "not_captured", "The payment didn't go through. You haven't been charged for a pass.");
-    const pass = await record(env, f, orderId, paymentId, payment.amount);
-    return json({ ok: true, pass: { plan: pass.plan, starts_at: pass.starts_at, ends_at: pass.ends_at } });
+    const r = await confirmAndRecord(env, f, paymentId, user.id);
+    if (r.kind === "recorded") return json({ ok: true, pass: { plan: r.pass.plan, starts_at: r.pass.starts_at, ends_at: r.pass.ends_at } });
+    if (r.kind === "not_paid") {
+      if (r.status === "processing" || r.status === "requires_customer_action" || r.status === "requires_confirmation" || r.status === null) {
+        return fail(202, "pending", "Your payment is still being confirmed. Your plan will start as soon as it goes through. Refresh this page in a minute.");
+      }
+      return fail(402, "not_paid", "The payment didn't go through. You haven't been charged for a pass.");
+    }
+    console.error("Payment can't start a pass", paymentId, r.why);
+    return fail(400, "not_ours", "We couldn't match this payment to your account. If money was taken, write to us and we'll sort it out.");
   } catch (e) {
-    console.error("Recording the payment failed", orderId, String(e).slice(0, 300));
-    // The webhook will record it once Razorpay reports it, so the seller isn't charged without a pass.
+    const msg = (e as Error).message;
+    if (msg === "dodo_404") return fail(400, "not_ours", "We couldn't find this payment. If money was taken, write to us and we'll sort it out.");
+    if (msg.includes("amount_mismatch") || msg.includes("order_already_paid") || msg.includes("order_not_found")) {
+      console.error("Payment needs a look in the Dodo dashboard", msg, paymentId);
+      return fail(409, "needs_review", "We received your payment but couldn't start the plan automatically. Write to us with your account email and we'll fix it.");
+    }
+    console.error("Recording the payment failed", paymentId, String(e).slice(0, 300));
+    // The webhook will record it once Dodo reports it, so the seller isn't charged without a pass.
     return fail(502, "pending", "Payment received. Your plan will be ready in a minute. Refresh this page shortly.");
   }
 }
 
 async function webhook(request: Request, env: Env, f: Fetch): Promise<Response> {
   const raw = await request.text().catch(() => "");
-  const signature = request.headers.get("x-razorpay-signature") ?? "";
-  if (!raw || raw.length > 1_000_000 || !signature || !env.RAZORPAY_WEBHOOK_SECRET) return fail(400, "bad_request", "Bad request.");
-  const expected = await hmacHex(env.RAZORPAY_WEBHOOK_SECRET, raw);
-  if (!safeEqual(expected, signature)) {
+  if (!raw || raw.length > 1_000_000) return fail(400, "bad_request", "Bad request.");
+  if (!(await verifyWebhook(env.DODO_WEBHOOK_SECRET ?? "", request.headers, raw))) {
     console.error("Webhook signature didn't match");
-    return fail(400, "bad_signature", "Bad signature.");
+    return fail(401, "bad_signature", "Bad signature.");
   }
 
-  let event: { event?: string; payload?: { payment?: { entity?: RazorpayPayment } } };
+  let event: { type?: string; data?: { payment_id?: string } };
   try {
     event = JSON.parse(raw);
   } catch {
     return fail(400, "bad_request", "Bad request.");
   }
-  if (event.event !== "payment.captured" && event.event !== "order.paid") return json({ ok: true, ignored: event.event ?? null });
-  const p = event.payload?.payment?.entity;
-  if (!p?.id || !p.order_id || p.status !== "captured" || p.currency !== "INR") return json({ ok: true, ignored: "not a captured INR payment" });
+  if (event.type !== "payment.succeeded") return json({ ok: true, ignored: event.type ?? null });
+  const paymentId = event.data?.payment_id ?? "";
+  if (!PAYMENT_ID_RE.test(paymentId)) return json({ ok: true, ignored: "no payment id" });
 
   try {
-    await record(env, f, p.order_id, p.id, p.amount);
-    return json({ ok: true });
+    // Ask Dodo directly rather than trusting the event body.
+    const r = await confirmAndRecord(env, f, paymentId, null);
+    if (r.kind === "recorded") return json({ ok: true });
+    if (r.kind === "not_paid") return fail(500, "retry", "Not settled yet."); // Dodo retries later
+    return json({ ok: true, ignored: r.why });
   } catch (e) {
     const msg = (e as Error).message;
-    // Payments for other things on the same Razorpay account aren't ours: acknowledge so Razorpay stops retrying.
-    if (msg.includes("order_not_found")) return json({ ok: true, ignored: "unknown order" });
+    // Payments for other things on the same Dodo account aren't ours: acknowledge so Dodo stops retrying.
+    if (msg === "dodo_404") return json({ ok: true, ignored: "unknown payment" });
+    if (msg.includes("order_not_found")) return json({ ok: true, ignored: "unknown checkout" });
     if (msg.includes("amount_mismatch") || msg.includes("order_already_paid")) {
-      console.error("Webhook payment needs a look in the Razorpay dashboard", msg, p.order_id);
+      console.error("Webhook payment needs a look in the Dodo dashboard", msg, paymentId);
       return json({ ok: true, ignored: msg });
     }
-    console.error("Webhook could not record the payment, Razorpay will retry", String(e).slice(0, 300));
+    console.error("Webhook could not record the payment, Dodo will retry", String(e).slice(0, 300));
     return fail(500, "retry", "Try again.");
   }
 }
@@ -305,18 +364,10 @@ async function webhook(request: Request, env: Env, f: Fetch): Promise<Response> 
 export async function handleBilling(request: Request, env: Env, f: Fetch = fetch): Promise<Response> {
   if (request.method !== "POST") return fail(405, "method_not_allowed", "Use POST.");
   const action = new URL(request.url).searchParams.get("action");
-  const ready = env.RAZORPAY_KEY_ID && env.RAZORPAY_KEY_SECRET && env.SUPABASE_SECRET_KEY && env.VITE_SUPABASE_URL && env.VITE_SUPABASE_PUBLISHABLE_KEY;
-  if (action === "webhook") return ready && env.RAZORPAY_WEBHOOK_SECRET ? webhook(request, env, f) : NOT_SET_UP();
+  const ready = env.DODO_API_KEY && env.SUPABASE_SECRET_KEY && env.VITE_SUPABASE_URL && env.VITE_SUPABASE_PUBLISHABLE_KEY;
+  if (action === "webhook") return ready && env.DODO_WEBHOOK_SECRET ? webhook(request, env, f) : NOT_SET_UP();
   if (!ready) return NOT_SET_UP();
-  if (action === "order") return createOrder(request, env, f);
+  if (action === "order") return createCheckout(request, env, f);
   if (action === "verify") return verifyPayment(request, env, f);
   return fail(404, "not_found", "Not found.");
 }
-
-export default {
-  fetch(request: Request): Promise<Response> {
-    // (Read through globalThis so this file needs no Node type definitions to compile on Vercel.)
-    const env = (globalThis as unknown as { process: { env: Env } }).process.env;
-    return handleBilling(request, env);
-  },
-};

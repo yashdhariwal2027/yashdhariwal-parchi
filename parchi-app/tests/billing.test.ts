@@ -1,11 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { handleBilling, hmacHex, safeEqual } from "../api/billing";
+import { handleBilling, safeEqual, verifyWebhook, webhookSignature, type Env } from "../api/billing";
 
-const ENV = {
-  RAZORPAY_KEY_ID: "rzp_test_abc",
-  RAZORPAY_KEY_SECRET: "rzp_secret_xyz",
-  RAZORPAY_WEBHOOK_SECRET: "whsec_123",
+const WH_SECRET = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+const ENV: Env = {
+  DODO_API_KEY: "dodo_test_key",
+  DODO_WEBHOOK_SECRET: WH_SECRET,
+  DODO_MODE: "test",
+  DODO_PRODUCT_STARTER: "pdt_starter",
+  DODO_PRODUCT_GROWTH: "pdt_growth",
+  DODO_PRODUCT_PRO: "pdt_pro",
   SUPABASE_SECRET_KEY: "sb_secret_test",
   VITE_SUPABASE_URL: "https://proj.supabase.co",
   VITE_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_test",
@@ -19,10 +23,11 @@ interface Call {
   body: unknown;
 }
 
-/** Fake Supabase + Razorpay. `db` mimics the billing functions; `payments` are what Razorpay reports. */
-function world(opts: { quoteError?: string; recordError?: string; payment?: Record<string, unknown>; captureTo?: string } = {}) {
+/** Fake Supabase + Dodo. `payment` overrides what Dodo reports for GET /payments/{id}. */
+function world(opts: { quoteError?: string; recordError?: string; payment?: Record<string, unknown>; checkout?: Record<string, unknown> } = {}) {
   const calls: Call[] = [];
-  const recorded: unknown[] = [];
+  const recorded: Record<string, unknown>[] = [];
+  const created: Record<string, unknown>[] = [];
   const f = (async (input: string | URL, init: RequestInit = {}) => {
     const url = String(input);
     const headers = Object.fromEntries(Object.entries((init.headers as Record<string, string>) ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
@@ -39,158 +44,181 @@ function world(opts: { quoteError?: string; recordError?: string; payment?: Reco
         if (opts.quoteError) return new Response(JSON.stringify({ message: opts.quoteError }), { status: 400 });
         return ok({ starter: 24900, growth: 34900, pro: 49900 }[(body as { p_plan: string }).p_plan]);
       }
-      if (fn === "billing_order_created") return ok(null);
+      if (fn === "billing_order_created") {
+        created.push(body as Record<string, unknown>);
+        return ok(null);
+      }
       if (fn === "billing_record_payment") {
         if (opts.recordError) return new Response(JSON.stringify({ message: opts.recordError }), { status: 400 });
-        recorded.push(body);
+        recorded.push(body as Record<string, unknown>);
         return ok({ plan: "growth", status: "paid", starts_at: "2026-10-16T00:00:00Z", ends_at: "2026-11-15T00:00:00Z" });
       }
     }
-    if (url === "https://api.razorpay.com/v1/orders") {
-      assert.equal(headers.authorization, "Basic " + btoa("rzp_test_abc:rzp_secret_xyz"));
-      const b = body as { amount: number; currency: string; receipt: string };
-      return ok({ id: "order_ABC", amount: b.amount, currency: b.currency });
-    }
-    const pm = url.match(/\/v1\/payments\/([^/]+)(\/capture)?$/);
-    if (pm) {
-      const base = { id: pm[1], order_id: "order_ABC", amount: 34900, currency: "INR", status: "captured", ...opts.payment };
-      if (pm[2]) return ok({ ...base, status: opts.captureTo ?? "captured" });
-      return ok(base);
+    if (url.startsWith("https://test.dodopayments.com/") || url.startsWith("https://live.dodopayments.com/")) {
+      assert.equal(headers.authorization, "Bearer dodo_test_key");
+      const path = url.replace(/^https:\/\/(test|live)\.dodopayments\.com/, "");
+      if (path === "/checkouts" && init.method === "POST") {
+        return ok({ session_id: "cks_ABC", checkout_url: "https://test.checkout.dodopayments.com/session/cks_ABC", ...opts.checkout });
+      }
+      const pm = path.match(/^\/payments\/([^/]+)$/);
+      if (pm) {
+        if (pm[1] === "pay_missing1") return new Response('{"message":"not found"}', { status: 404 });
+        return ok({
+          payment_id: pm[1],
+          status: "succeeded",
+          total_amount: 34900,
+          currency: "INR",
+          checkout_session_id: "cks_ABC",
+          metadata: { user_id: USER.id, plan: "growth" },
+          ...opts.payment,
+        });
+      }
     }
     throw new Error("unexpected " + url);
   }) as typeof fetch;
-  return { f, calls, recorded };
+  return { f, calls, recorded, created };
 }
 
 const post = (action: string, body: unknown, token: string | null = "good-token", extra: Record<string, string> = {}) =>
-  new Request(`https://app.example/api/billing?action=${action}`, {
+  new Request(`https://parchi.site/api/billing?action=${action}`, {
     method: "POST",
     headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}), ...extra },
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
 
-test("signatures: HMAC-SHA256 hex, same as Razorpay's documented formula", async () => {
-  // Known vector (RFC 4231 test case 2)
-  assert.equal(await hmacHex("Jefe", "what do ya want for nothing?"), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
-  assert.ok(safeEqual("abc", "abc"));
-  assert.ok(!safeEqual("abc", "abd"));
-  assert.ok(!safeEqual("abc", "abcd"));
+async function signedWebhook(event: unknown, opts: { secret?: string; ts?: number; tamper?: boolean } = {}) {
+  const body = JSON.stringify(event);
+  const ts = String(opts.ts ?? Math.floor(Date.now() / 1000));
+  const sig = await webhookSignature(opts.secret ?? WH_SECRET, "msg_1", ts, body);
+  return new Request("https://parchi.site/api/billing?action=webhook", {
+    method: "POST",
+    headers: { "content-type": "application/json", "webhook-id": "msg_1", "webhook-timestamp": ts, "webhook-signature": `v1,${sig}` },
+    body: opts.tamper ? body.replace("pay_", "pay_X") : body,
+  });
+}
+
+test("webhook signature matches the Standard Webhooks reference vector", async () => {
+  // Published test vector from the Standard Webhooks spec (also used by Svix).
+  const sig = await webhookSignature(WH_SECRET, "msg_p5jXN8AQM9LWM0D4loKWxJek", "1614265330", '{"test": 2432232314}');
+  assert.equal(sig, "g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=");
+  const h = new Headers({ "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek", "webhook-timestamp": "1614265330", "webhook-signature": `v0,abc v1,${sig}` });
+  assert.ok(await verifyWebhook(WH_SECRET, h, '{"test": 2432232314}', 1614265330 + 60));
+  assert.ok(!(await verifyWebhook(WH_SECRET, h, '{"test": 2432232315}', 1614265330)), "changed body");
+  assert.ok(!(await verifyWebhook(WH_SECRET, h, '{"test": 2432232314}', 1614265330 + 301)), "too old");
+  assert.ok(!(await verifyWebhook("whsec_" + btoa("other-secret"), h, '{"test": 2432232314}', 1614265330)), "wrong secret");
+  assert.ok(!(await verifyWebhook("not base64 !!", h, '{"test": 2432232314}', 1614265330)), "broken secret");
+  assert.ok(safeEqual("abc", "abc") && !safeEqual("abc", "abd") && !safeEqual("abc", "abcd"));
 });
 
-test("order: signed-in seller gets a Razorpay order for the database's price", async () => {
+test("order: signed-in seller gets a Dodo checkout for the plan's product", async () => {
   const w = world();
   const res = await handleBilling(post("order", { plan: "growth" }), ENV, w.f);
-  const body = await res.json();
   assert.equal(res.status, 200);
-  assert.deepEqual(
-    { ok: body.ok, keyId: body.keyId, orderId: body.orderId, amount: body.amount, currency: body.currency, planName: body.planName, email: body.email },
-    { ok: true, keyId: "rzp_test_abc", orderId: "order_ABC", amount: 34900, currency: "INR", planName: "Growth", email: "noor@example.com" },
-  );
-  const order = w.calls.find((c) => c.url.endsWith("/v1/orders"))!;
-  assert.deepEqual((order.body as { notes: unknown }).notes, { user_id: USER.id, plan: "growth" });
-  assert.ok(((order.body as { receipt: string }).receipt).length <= 40);
-  const created = w.calls.find((c) => c.url.endsWith("/billing_order_created"))!;
-  assert.deepEqual(created.body, { p_user_id: USER.id, p_plan: "growth", p_order_id: "order_ABC" });
-  assert.ok(!JSON.stringify(body).includes("rzp_secret"), "the key secret never reaches the browser");
+  const b = await res.json();
+  assert.equal(b.checkoutUrl, "https://test.checkout.dodopayments.com/session/cks_ABC");
+  const co = w.calls.find((c) => c.url === "https://test.dodopayments.com/checkouts")!;
+  const body = co.body as Record<string, any>;
+  assert.deepEqual(body.product_cart, [{ product_id: "pdt_growth", quantity: 1 }]);
+  assert.equal(body.customer.email, USER.email);
+  assert.equal(body.billing_address.country, "IN");
+  assert.equal(body.return_url, "https://parchi.site/plan");
+  assert.deepEqual(body.metadata, { user_id: USER.id, plan: "growth" });
+  assert.equal(body.feature_flags.allow_discount_code, false);
+  assert.deepEqual(w.created, [{ p_user_id: USER.id, p_plan: "growth", p_order_id: "cks_ABC" }]);
+  // Live mode uses the live API
+  const w2 = world();
+  await handleBilling(post("order", { plan: "pro" }), { ...ENV, DODO_MODE: "live" }, w2.f);
+  assert.ok(w2.calls.some((c) => c.url === "https://live.dodopayments.com/checkouts" && (c.body as any).product_cart[0].product_id === "pdt_pro"));
 });
 
-test("order: refusals", async () => {
-  const w = world();
+test("order: refuses signed-out, unknown plans, missing product IDs, and a pass already waiting", async () => {
+  let w = world();
   assert.equal((await handleBilling(post("order", { plan: "growth" }, null), ENV, w.f)).status, 401);
-  assert.equal((await handleBilling(post("order", { plan: "growth" }, "bad-token"), ENV, w.f)).status, 401);
   assert.equal((await handleBilling(post("order", { plan: "gold" }), ENV, w.f)).status, 400);
-  assert.equal((await handleBilling(post("order", "{not json"), ENV, w.f)).status, 400);
-  const waiting = world({ quoteError: "pass_already_waiting" });
-  const r = await handleBilling(post("order", { plan: "pro" }), ENV, waiting.f);
+  assert.equal((await handleBilling(post("order", { plan: "growth" }), { ...ENV, DODO_PRODUCT_GROWTH: "" }, w.f)).status, 503);
+  w = world({ quoteError: "pass_already_waiting" });
+  const r = await handleBilling(post("order", { plan: "growth" }), ENV, w.f);
   assert.equal(r.status, 409);
-  assert.match((await r.json()).message, /already paid for/);
-  assert.equal(waiting.calls.filter((c) => c.url.includes("razorpay")).length, 0, "no Razorpay order when buying isn't allowed");
-  assert.equal((await handleBilling(post("order", { plan: "pro" }), { ...ENV, RAZORPAY_KEY_SECRET: "" }, w.f)).status, 503);
-  assert.equal((await handleBilling(new Request("https://app.example/api/billing?action=order"), ENV, w.f)).status, 405);
+  assert.ok(!w.calls.some((c) => c.url.includes("dodopayments")), "no checkout made");
+  w = world({ checkout: { checkout_url: null } });
+  assert.equal((await handleBilling(post("order", { plan: "growth" }), ENV, w.f)).status, 502);
+  assert.equal(w.created.length, 0);
 });
 
-async function signed(order = "order_ABC", payment = "pay_XYZ", secret = ENV.RAZORPAY_KEY_SECRET) {
-  return { razorpay_order_id: order, razorpay_payment_id: payment, razorpay_signature: await hmacHex(secret, `${order}|${payment}`) };
-}
-
-test("verify: a genuine, captured payment starts the pass", async () => {
+test("verify: a succeeded INR payment for this seller starts the pass", async () => {
   const w = world();
-  const res = await handleBilling(post("verify", await signed()), ENV, w.f);
+  const res = await handleBilling(post("verify", { payment_id: "pay_123abc" }), ENV, w.f);
   assert.equal(res.status, 200);
-  assert.deepEqual((await res.json()).pass, { plan: "growth", starts_at: "2026-10-16T00:00:00Z", ends_at: "2026-11-15T00:00:00Z" });
-  assert.deepEqual(w.recorded, [{ p_order_id: "order_ABC", p_payment_id: "pay_XYZ", p_amount_paise: 34900 }]);
+  assert.equal((await res.json()).pass.plan, "growth");
+  assert.deepEqual(w.recorded, [{ p_order_id: "cks_ABC", p_payment_id: "pay_123abc", p_amount_paise: 34900 }]);
 });
 
-test("verify: forged or mismatched payments are refused", async () => {
+test("verify: refuses payments that aren't proven, aren't ours or aren't finished", async () => {
+  const cases: [Record<string, unknown>, number][] = [
+    [{ status: "failed" }, 402],
+    [{ status: "processing" }, 202],
+    [{ metadata: { user_id: "someone-else" } }, 400],
+    [{ checkout_session_id: null }, 400],
+    [{ currency: "USD" }, 400],
+  ];
+  for (const [payment, code] of cases) {
+    const w = world({ payment });
+    const r = await handleBilling(post("verify", { payment_id: "pay_123abc" }), ENV, w.f);
+    assert.equal(r.status, code, JSON.stringify(payment));
+    assert.equal(w.recorded.length, 0, JSON.stringify(payment));
+  }
   const w = world();
-  const forged = await signed("order_ABC", "pay_XYZ", "wrong-secret");
-  assert.equal((await handleBilling(post("verify", forged), ENV, w.f)).status, 400);
-  const swapped = { ...(await signed()), razorpay_payment_id: "pay_OTHER" };
-  assert.equal((await handleBilling(post("verify", swapped), ENV, w.f)).status, 400);
+  assert.equal((await handleBilling(post("verify", { payment_id: "../../etc" }), ENV, w.f)).status, 400);
+  const missing = await handleBilling(post("verify", { payment_id: "pay_missing1" }), ENV, w.f);
+  assert.equal(missing.status, 400);
+  assert.equal((await missing.json()).error, "not_ours");
+  assert.equal((await handleBilling(post("verify", { payment_id: "pay_123abc" }, "bad"), ENV, w.f)).status, 401);
+  // Database says the amount is wrong (e.g. product set up without GST included): no pass, clear message
+  const w2 = world({ recordError: "amount_mismatch" });
+  const r2 = await handleBilling(post("verify", { payment_id: "pay_123abc" }), ENV, w2.f);
+  assert.equal(r2.status, 409);
+  assert.equal((await r2.json()).error, "needs_review");
+});
+
+test("webhook: signed payment.succeeded records the pass after asking Dodo; anything else is refused or ignored", async () => {
+  const ev = { business_id: "bus_1", type: "payment.succeeded", timestamp: new Date().toISOString(), data: { payload_type: "Payment", payment_id: "pay_123abc" } };
+  let w = world();
+  let r = await handleBilling(await signedWebhook(ev), ENV, w.f);
+  assert.equal(r.status, 200);
+  assert.equal(w.recorded.length, 1);
+  assert.ok(w.calls.some((c) => c.url === "https://test.dodopayments.com/payments/pay_123abc"), "checked with Dodo");
+
+  for (const bad of [{ tamper: true }, { secret: "whsec_" + btoa("wrong") }, { ts: Math.floor(Date.now() / 1000) - 3600 }]) {
+    w = world();
+    r = await handleBilling(await signedWebhook(ev, bad), ENV, w.f);
+    assert.equal(r.status, 401, JSON.stringify(bad));
+    assert.equal(w.recorded.length, 0);
+  }
+  w = world();
+  r = await handleBilling(await signedWebhook({ ...ev, type: "payment.failed" }), ENV, w.f);
+  assert.equal(r.status, 200);
   assert.equal(w.recorded.length, 0);
-  assert.equal(w.calls.filter((c) => c.url.includes("razorpay")).length, 0, "Razorpay isn't even asked for forged requests");
-
-  const otherOrder = world({ payment: { order_id: "order_SOMEONE_ELSE" } });
-  assert.equal((await handleBilling(post("verify", await signed()), ENV, otherOrder.f)).status, 402);
-  const failed = world({ payment: { status: "failed" } });
-  assert.equal((await handleBilling(post("verify", await signed()), ENV, failed.f)).status, 402);
-  const usd = world({ payment: { currency: "USD" } });
-  assert.equal((await handleBilling(post("verify", await signed()), ENV, usd.f)).status, 402);
-  assert.equal(otherOrder.recorded.length + failed.recorded.length + usd.recorded.length, 0);
-  assert.equal((await handleBilling(post("verify", await signed(), null), ENV, w.f)).status, 401);
+  // Not our checkout (another product on the same Dodo account): acknowledged, nothing recorded
+  w = world({ recordError: "order_not_found" });
+  r = await handleBilling(await signedWebhook(ev), ENV, w.f);
+  assert.equal(r.status, 200);
+  // Database briefly down: 500 so Dodo retries
+  w = world({ recordError: "connection reset" });
+  r = await handleBilling(await signedWebhook(ev), ENV, w.f);
+  assert.equal(r.status, 500);
+  // Dodo says it's not settled yet: retry later
+  w = world({ payment: { status: "processing" } });
+  r = await handleBilling(await signedWebhook(ev), ENV, w.f);
+  assert.equal(r.status, 500);
+  assert.equal(w.recorded.length, 0);
 });
 
-test("verify: an authorised payment is captured first", async () => {
-  const w = world({ payment: { status: "authorized" } });
-  assert.equal((await handleBilling(post("verify", await signed()), ENV, w.f)).status, 200);
-  const cap = w.calls.find((c) => c.url.endsWith("/capture"))!;
-  assert.deepEqual(cap.body, { amount: 34900, currency: "INR" });
-  const stuck = world({ payment: { status: "authorized" }, captureTo: "authorized" });
-  assert.equal((await handleBilling(post("verify", await signed()), ENV, stuck.f)).status, 402);
-});
-
-test("verify: if recording fails, the seller is told the plan will follow (the webhook records it)", async () => {
-  const w = world({ recordError: "connection reset" });
-  const res = await handleBilling(post("verify", await signed()), ENV, w.f);
-  assert.equal(res.status, 502);
-  assert.match((await res.json()).message, /Payment received/);
-});
-
-function webhookRequest(payload: unknown, secret = ENV.RAZORPAY_WEBHOOK_SECRET) {
-  const raw = JSON.stringify(payload);
-  return hmacHex(secret, raw).then(
-    (sig) => new Request("https://app.example/api/billing?action=webhook", { method: "POST", headers: { "x-razorpay-signature": sig, "content-type": "application/json" }, body: raw }),
-  );
-}
-
-const captured = (over: Record<string, unknown> = {}) => ({
-  event: "payment.captured",
-  payload: { payment: { entity: { id: "pay_XYZ", order_id: "order_ABC", amount: 34900, currency: "INR", status: "captured", ...over } } },
-});
-
-test("webhook: records captured payments, checks the signature, ignores what isn't ours", async () => {
+test("not configured: everything answers 'not set up' without calling anyone", async () => {
   const w = world();
-  assert.equal((await handleBilling(await webhookRequest(captured()), ENV, w.f)).status, 200);
-  assert.equal((await handleBilling(await webhookRequest({ ...captured(), event: "order.paid" }), ENV, w.f)).status, 200);
-  assert.equal(w.recorded.length, 2, "both events record (the database makes the second one a no-op)");
-
-  const forged = await webhookRequest(captured(), "not-the-secret");
-  assert.equal((await handleBilling(forged, ENV, w.f)).status, 400);
-  const tampered = new Request("https://app.example/api/billing?action=webhook", {
-    method: "POST",
-    headers: { "x-razorpay-signature": await hmacHex(ENV.RAZORPAY_WEBHOOK_SECRET, JSON.stringify(captured())) },
-    body: JSON.stringify(captured({ amount: 1 })),
-  });
-  assert.equal((await handleBilling(tampered, ENV, w.f)).status, 400);
-  assert.equal(w.recorded.length, 2);
-
-  const ignored = await (await handleBilling(await webhookRequest({ event: "payment.failed", payload: {} }), ENV, w.f)).json();
-  assert.equal(ignored.ignored, "payment.failed");
-  const notOurs = world({ recordError: "order_not_found" });
-  const r = await handleBilling(await webhookRequest(captured()), ENV, notOurs.f);
-  assert.equal(r.status, 200, "other payments on the same Razorpay account are acknowledged, not retried forever");
-  const down = world({ recordError: "connection reset" });
-  assert.equal((await handleBilling(await webhookRequest(captured()), ENV, down.f)).status, 500, "a database hiccup asks Razorpay to retry");
-  const noToken = await handleBilling(await webhookRequest(captured()), { ...ENV, RAZORPAY_WEBHOOK_SECRET: "" }, w.f);
-  assert.equal(noToken.status, 503);
+  for (const a of ["order", "verify", "webhook"]) {
+    const r = await handleBilling(post(a, {}), { VITE_SUPABASE_URL: ENV.VITE_SUPABASE_URL }, w.f);
+    assert.equal(r.status, 503);
+  }
+  assert.equal(w.calls.length, 0);
+  assert.equal((await handleBilling(new Request("https://parchi.site/api/billing?action=order"), ENV, w.f)).status, 405);
 });

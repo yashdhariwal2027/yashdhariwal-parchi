@@ -34,7 +34,7 @@ export function Footer() {
             © 2026 {COMPANY.brand}
             {COMPANY.legalName ? `, run by ${COMPANY.legalName}` : ""}
           </p>
-          <p>Payments by Razorpay. Parchi is not affiliated with WhatsApp or Meta.</p>
+          <p>Payments by Dodo Payments. Parchi is not affiliated with WhatsApp or Meta.</p>
         </div>
       </div>
     </footer>

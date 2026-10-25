@@ -1,8 +1,7 @@
-import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { useEffect, useRef, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import { Check, Sparkles } from "lucide-react";
-import { useAuth, useBusiness } from "@/lib/auth";
-import { buyPass, fetchPayments, summarize, useBilling, type BillingStatus, type PassRow } from "@/lib/billing";
+import { buyPass, confirmReturn, fetchPayments, summarize, useBilling, type BillingStatus, type PassRow } from "@/lib/billing";
 import { chosenPlan, forgetChosenPlan, PLAN_FEATURES, PLANS, planById, type PlanId } from "@/lib/plans";
 import { Notice, PageLoading, Spinner, useToast } from "@/components/ui";
 import { cn } from "@/lib/utils";
@@ -15,36 +14,69 @@ const rupees = (n: number) => `₹${n.toLocaleString("en-IN")}`;
 
 /** Buying a pass: shared by the Plan page and the "choose a plan" screen on New invoice. */
 function useBuy() {
-  const { session } = useAuth();
-  const biz = useBusiness();
-  const { reload } = useBilling();
-  const toast = useToast();
   const [busy, setBusy] = useState<PlanId | null>(null);
   const [message, setMessage] = useState<{ tone: "danger" | "info"; text: string } | null>(null);
 
+  /** Sends the seller to Dodo's payment page. Only returns (false) if that couldn't start. */
   async function buy(plan: PlanId): Promise<boolean> {
     setBusy(plan);
     setMessage(null);
-    try {
-      const r = await buyPass(plan, { email: session?.user.email ?? undefined, contact: biz.phone ?? undefined, name: biz.name });
+    const r = await buyPass(plan);
+    if (r.kind === "redirecting") return false; // leaving the page; keep the button busy
+    setBusy(null);
+    if (r.kind === "failed") setMessage({ tone: "danger", text: r.message });
+    return false;
+  }
+  return { buy, busy, message };
+}
+
+/**
+ * Back from Dodo's page (/plan?payment_id=...&status=...): confirms the payment with our server, which starts
+ * the pass, then tidies the address bar so a refresh doesn't repeat it.
+ */
+function usePaymentReturn() {
+  const { reload } = useBilling();
+  const toast = useToast();
+  const [params, setParams] = useSearchParams();
+  const paymentId = params.get("payment_id");
+  const [checking, setChecking] = useState(Boolean(paymentId));
+  const [message, setMessage] = useState<{ tone: "danger" | "info"; text: string } | null>(null);
+
+  const handled = useRef<string | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    // Clearing the address bar changes paymentId to null, so guard by ID instead of cancelling on change.
+    if (!paymentId || handled.current === paymentId) return;
+    handled.current = paymentId;
+    const urlStatus = params.get("status");
+    setChecking(true);
+    setParams({}, { replace: true });
+    (async () => {
+      const r = await confirmReturn(paymentId);
+      if (!mounted.current) return;
       if (r.kind === "paid") {
         forgetChosenPlan();
         await reload();
         toast(`Payment received. ${planById(r.plan)?.name} plan ${Date.parse(r.startsAt) > Date.now() + 60_000 ? `starts on ${formatDay(r.startsAt)}` : `active until ${formatDay(r.endsAt)}`}.`);
-        return true;
-      }
-      if (r.kind === "pending") {
+      } else if (r.kind === "pending") {
         setMessage({ tone: "info", text: r.message });
         window.setTimeout(reload, 15_000);
       } else if (r.kind === "failed") {
-        setMessage({ tone: "danger", text: r.message });
+        setMessage({ tone: "danger", text: urlStatus === "succeeded" ? r.message : "The payment didn't go through. You haven't been charged for a pass. You can try again below." });
       }
-      return false;
-    } finally {
-      setBusy(null);
-    }
-  }
-  return { buy, busy, message };
+      if (mounted.current) setChecking(false);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paymentId]);
+
+  return { checking, message };
 }
 
 export function PlanCards({
@@ -122,7 +154,7 @@ export function PlanCards({
         ) : s.usedUp ? (
           <p>You've used all your invoices, so a new pass starts straight away.</p>
         ) : null}
-        <p>Each pass lasts 30 days. Nothing renews or charges automatically. Pay by UPI, card or netbanking through Razorpay.</p>
+        <p>Each pass lasts 30 days. Nothing renews or charges automatically. Pay by UPI or card through Dodo Payments. Prices include GST.</p>
       </div>
     </div>
   );
@@ -155,6 +187,7 @@ function Usage({ label, used, limit }: { label: string; used: number; limit: num
 export function PlanPage() {
   const { status, error, reload } = useBilling();
   const { buy, busy, message } = useBuy();
+  const back = usePaymentReturn();
   const [payments, setPayments] = useState<PassRow[] | null>(null);
   const navigate = useNavigate();
   const s = summarize(status);
@@ -221,6 +254,16 @@ export function PlanPage() {
             : s.endingSoon
               ? `Your pass ends on ${formatDay(a!.ends_at)}. Renew now and the new pass starts when this one ends.`
               : `You've used ${a!.invoices_used} of ${a!.invoice_limit} invoices. Upgrade or renew before you run out.`}
+        </Notice>
+      )}
+      {back.checking && (
+        <Notice tone="info" role="status" className="mt-4">
+          <Spinner label="Confirming your payment..." />
+        </Notice>
+      )}
+      {back.message && (
+        <Notice tone={back.message.tone} role="alert" className="mt-4">
+          {back.message.text}
         </Notice>
       )}
       {message && (

@@ -16,7 +16,7 @@ import { BillingProvider } from "@/lib/billing";
 import { Landing } from "@/landing/Landing";
 import { Contact, PricingPage, Privacy, Refunds, Shipping, Terms } from "@/landing/Policies";
 
-/** Public pages, open to everyone (Razorpay requires them). */
+/** Public pages, open to everyone (the payment provider checks them). */
 const POLICY_ROUTES = [
   { path: "/terms", element: <Terms /> },
   { path: "/privacy", element: <Privacy /> },

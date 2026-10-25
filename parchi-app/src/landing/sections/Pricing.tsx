@@ -1,7 +1,6 @@
 import { Link } from "react-router";
 import { Check } from "lucide-react";
 import { PLAN_FEATURES, PLANS, rememberPlan } from "@/lib/plans";
-import { COMPANY } from "@/landing/company";
 import { cn } from "@/lib/utils";
 
 const perInvoice = (price: number, invoices: number) => {
@@ -80,8 +79,7 @@ export function Pricing({ headingLevel = 2 }: { headingLevel?: 1 | 2 }) {
           </ul>
         </div>
         <p className="mx-auto mt-5 max-w-[720px] text-center text-[14px] text-muted">
-          Pay by UPI, card or netbanking through Razorpay.{" "}
-          {COMPANY.gstin ? "Prices include GST." : "Prices are final, no GST added."} Passes aren't refundable once started.{" "}
+          Pay by UPI or card through Dodo Payments. Prices include GST. Passes aren't refundable once started.{" "}
           <Link to="/refunds" className="underline">
             Cancellation and refund policy
           </Link>

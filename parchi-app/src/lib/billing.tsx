@@ -1,4 +1,4 @@
-/* The seller's plan: what's active, what's left, and paying for a new 30-day pass with Razorpay. */
+/* The seller's plan: what's active, what's left, and paying for a new 30-day pass with Dodo Payments. */
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { supabase } from "./supabase";
@@ -110,54 +110,8 @@ export function useBilling(): BillingState {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Checkout
+// Checkout (Dodo Payments hosted page: we send the seller there, Dodo sends them back to /plan)
 // ---------------------------------------------------------------------------------------------
-
-interface RazorpayResponse {
-  razorpay_payment_id: string;
-  razorpay_order_id: string;
-  razorpay_signature: string;
-}
-
-interface RazorpayInstance {
-  open(): void;
-  on(event: "payment.failed", cb: (r: { error?: { description?: string; reason?: string } }) => void): void;
-}
-
-declare global {
-  interface Window {
-    Razorpay?: new (options: Record<string, unknown>) => RazorpayInstance;
-  }
-}
-
-let scriptPromise: Promise<void> | null = null;
-
-/** Loads Razorpay's checkout script once (it has to come from Razorpay's own site). */
-export function loadRazorpay(src = "https://checkout.razorpay.com/v1/checkout.js"): Promise<void> {
-  if (window.Razorpay) return Promise.resolve();
-  if (!scriptPromise) {
-    scriptPromise = new Promise<void>((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = src;
-      s.async = true;
-      const timer = window.setTimeout(() => reject(new Error("checkout_timeout")), 20_000);
-      s.onload = () => {
-        window.clearTimeout(timer);
-        if (window.Razorpay) resolve();
-        else reject(new Error("checkout_unavailable"));
-      };
-      s.onerror = () => {
-        window.clearTimeout(timer);
-        reject(new Error("checkout_unavailable"));
-      };
-      document.head.appendChild(s);
-    }).catch((e) => {
-      scriptPromise = null;
-      throw e;
-    });
-  }
-  return scriptPromise;
-}
 
 async function call(action: string, body: unknown): Promise<{ status: number; body: Record<string, unknown> | null }> {
   const { data } = await supabase.auth.getSession();
@@ -173,70 +127,38 @@ async function call(action: string, body: unknown): Promise<{ status: number; bo
 export type CheckoutResult =
   | { kind: "paid"; plan: PlanId; startsAt: string; endsAt: string }
   | { kind: "pending"; message: string }
-  | { kind: "cancelled" }
+  | { kind: "redirecting" }
   | { kind: "failed"; message: string };
 
 const GENERIC = "Couldn't start the payment. Please try again.";
 
-/**
- * Opens Razorpay Checkout for a 30-day pass. Resolves when the payment is confirmed by our server,
- * or when the seller closes the window.
- */
-export async function buyPass(plan: PlanId, prefill: { email?: string; contact?: string; name?: string }): Promise<CheckoutResult> {
+/** Starts a Dodo checkout for a 30-day pass and sends the seller to Dodo's payment page. */
+export async function buyPass(plan: PlanId, go: (url: string) => void = (url) => window.location.assign(url)): Promise<CheckoutResult> {
+  let r: { status: number; body: Record<string, unknown> | null };
   try {
-    await loadRazorpay();
-  } catch {
-    return { kind: "failed", message: "Couldn't open the payment window. Check your internet connection and try again." };
-  }
-  let order: { status: number; body: Record<string, unknown> | null };
-  try {
-    order = await call("order", { plan });
+    r = await call("order", { plan });
   } catch {
     return { kind: "failed", message: "You seem to be offline. Check your internet connection and try again." };
   }
-  const o = order.body;
-  if (!o?.ok) return { kind: "failed", message: typeof o?.message === "string" ? o.message : GENERIC };
+  const b = r.body;
+  const url = typeof b?.checkoutUrl === "string" ? b.checkoutUrl : "";
+  if (!b?.ok || !/^(https:\/\/|http:\/\/localhost[:/])/.test(url)) return { kind: "failed", message: typeof b?.message === "string" ? b.message : GENERIC };
+  go(url);
+  return { kind: "redirecting" };
+}
 
-  return new Promise<CheckoutResult>((resolve) => {
-    let settled = false;
-    const done = (r: CheckoutResult) => {
-      if (!settled) {
-        settled = true;
-        resolve(r);
-      }
-    };
-    const rzp = new window.Razorpay!({
-      key: o.keyId,
-      amount: o.amount,
-      currency: o.currency,
-      order_id: o.orderId,
-      name: "Parchi",
-      description: `${o.planName} plan, 30 days`,
-      prefill: { email: prefill.email || o.email, contact: prefill.contact, name: prefill.name },
-      notes: { plan },
-      theme: { color: "#0e6b4f" },
-      modal: { ondismiss: () => done({ kind: "cancelled" }), confirm_close: true },
-      handler: async (resp: RazorpayResponse) => {
-        try {
-          const v = await call("verify", resp);
-          const b = v.body;
-          if (b?.ok) {
-            const pass = b.pass as { plan: PlanId; starts_at: string; ends_at: string };
-            done({ kind: "paid", plan: pass.plan, startsAt: pass.starts_at, endsAt: pass.ends_at });
-          } else if (b?.error === "pending") {
-            done({ kind: "pending", message: String(b.message) });
-          } else {
-            done({ kind: "failed", message: typeof b?.message === "string" ? b.message : GENERIC });
-          }
-        } catch {
-          done({ kind: "pending", message: "Payment received. Your plan will be ready in a minute. Refresh this page shortly." });
-        }
-      },
-    });
-    rzp.on("payment.failed", (r) => {
-      // Razorpay keeps its window open so the seller can try another way; we only note the reason.
-      console.warn("Payment attempt failed", r?.error?.reason);
-    });
-    rzp.open();
-  });
+/** Back from Dodo's page with ?payment_id=...: asks our server to check the payment and start the pass. */
+export async function confirmReturn(paymentId: string): Promise<CheckoutResult> {
+  try {
+    const v = await call("verify", { payment_id: paymentId });
+    const b = v.body;
+    if (b?.ok) {
+      const pass = b.pass as { plan: PlanId; starts_at: string; ends_at: string };
+      return { kind: "paid", plan: pass.plan, startsAt: pass.starts_at, endsAt: pass.ends_at };
+    }
+    if (b?.error === "pending") return { kind: "pending", message: String(b.message) };
+    return { kind: "failed", message: typeof b?.message === "string" ? b.message : GENERIC };
+  } catch {
+    return { kind: "pending", message: "Payment received. Your plan will be ready in a minute. Refresh this page shortly." };
+  }
 }

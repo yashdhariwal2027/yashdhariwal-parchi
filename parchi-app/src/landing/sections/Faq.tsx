@@ -27,7 +27,7 @@ const FAQS = [
   },
   {
     q: "Is my customers' data safe?",
-    a: "Each seller's data is private to their account. Customers' phone numbers are removed before a message is sent to the AI. Payments are handled by Razorpay; we never see card or UPI details.",
+    a: "Each seller's data is private to their account. Customers' phone numbers are removed before a message is sent to the AI. Payments are handled by Dodo Payments; we never see card or UPI details.",
   },
   {
     q: "Is Parchi connected to WhatsApp?",

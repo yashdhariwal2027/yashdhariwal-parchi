@@ -1,6 +1,6 @@
 /*
  * Who runs Parchi. Shown on the Terms, Privacy, Refunds, Delivery and Contact pages and in the footer.
- * Razorpay checks that these match the KYC on your Razorpay account (name, contact, address).
+ * The payment provider (Dodo Payments) checks that these match the verification on the account (name, contact, address).
  *
  * A test (tests/company.test.ts) fails while any required field is empty, so the site can't be packaged
  * with missing details.
@@ -9,7 +9,7 @@
 export const COMPANY = {
   /** Product name customers see */
   brand: "Parchi",
-  /** The person named on the Razorpay account */
+  /** The person named on the payment account */
   legalName: "Yash Dhariwal",
   /** Support email shown to customers */
   email: "parchicontact@gmail.com",
@@ -24,7 +24,7 @@ export const COMPANY = {
   /** Support hours shown on the Contact page. Optional. */
   hours: "",
   /** Date the policies were last updated, shown on each page */
-  policiesUpdated: "15 October 2026",
+  policiesUpdated: "25 October 2026",
 };
 
 export const REQUIRED_COMPANY_FIELDS = ["legalName", "email", "address", "city"] as const;
