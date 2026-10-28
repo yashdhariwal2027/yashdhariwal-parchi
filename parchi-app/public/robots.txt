@@ -1,0 +1,11 @@
+User-agent: *
+Allow: /
+Disallow: /invoices
+Disallow: /drafts
+Disallow: /products
+Disallow: /settings
+Disallow: /plan
+Disallow: /signin
+Disallow: /reset-password
+
+Sitemap: https://parchi.site/sitemap.xml

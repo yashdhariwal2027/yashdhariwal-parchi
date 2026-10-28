@@ -24,7 +24,7 @@ export const COMPANY = {
   /** Support hours shown on the Contact page. Optional. */
   hours: "",
   /** Date the policies were last updated, shown on each page */
-  policiesUpdated: "25 October 2026",
+  policiesUpdated: "28 October 2026",
 };
 
 export const REQUIRED_COMPANY_FIELDS = ["legalName", "email", "address", "city"] as const;

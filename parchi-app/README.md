@@ -92,7 +92,13 @@ Notes:
 - **Payment problems** (charged twice, or charged without a pass) are refunded from the Dodo dashboard.
 - `GEMINI_API_BASE` and `DODO_API_BASE` exist only for automated tests. Never set them in Cloudflare.
 
-## 6. Run on your computer (optional)
+## 6. Analytics: Microsoft Clarity and Google Search Console
+
+**Clarity** (heatmaps and recordings). Create a project at clarity.microsoft.com for `https://parchi.site`, then copy its **Project ID** (Settings > Overview, a short code like `abc123xyz0`). In Cloudflare add it as **Text**: `VITE_CLARITY_PROJECT_ID`, and redeploy. Don't paste Clarity's install snippet anywhere; the app adds it itself, only on the live site. Everything inside a signed-in account is masked in recordings (`data-clarity-mask`), so invoices, customers and business details never reach Clarity. Leave Clarity's masking setting on **Balanced** or **Strict**.
+
+**Search Console.** Add a **Domain** property for `parchi.site` and verify it (Cloudflare offers one-click DNS verification). Then submit `sitemap.xml`. `public/robots.txt` and `public/sitemap.xml` list the public pages and keep app pages out of search.
+
+## 7. Run on your computer (optional)
 
 Needs Node.js 20.19+ (`node -v`).
 

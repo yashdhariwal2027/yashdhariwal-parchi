@@ -44,7 +44,7 @@ export default function App() {
 }
 
 function Gate() {
-  const { session, business, businessError, reloadBusiness } = useAuth();
+  const { session } = useAuth();
 
   if (session === undefined) return <PageLoading />;
 
@@ -63,6 +63,17 @@ function Gate() {
       </Routes>
     );
   }
+
+  // Clarity: mask everything a signed-in seller sees (invoices, customers, business details).
+  return (
+    <div data-clarity-mask="True" className="contents">
+      <SignedIn />
+    </div>
+  );
+}
+
+function SignedIn() {
+  const { business, businessError, reloadBusiness } = useAuth();
 
   if (businessError) {
     return (

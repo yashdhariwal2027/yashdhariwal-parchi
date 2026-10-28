@@ -167,7 +167,7 @@ export function Privacy() {
       </S>
       <S title="Who processes your data for us">
         <p>
-          Supabase (database and sign-in), Cloudflare (hosting), Google (AI order reading) and Dodo Payments (payments and tax invoices for your plan). They process data only to provide their
+          Supabase (database and sign-in), Cloudflare (hosting), Google (AI order reading), Dodo Payments (payments and tax invoices for your plan) and Microsoft Clarity (site analytics). They process data only to provide their
           service to us. Their servers may be outside India.
         </p>
       </S>
@@ -190,7 +190,15 @@ export function Privacy() {
         </p>
       </S>
       <S title="Cookies and storage">
-        <p>Parchi stores your sign-in and any unsaved invoice on your device so you don't lose work. We don't use advertising or tracking cookies.</p>
+        <p>Parchi stores your sign-in and any unsaved invoice on your device so you don't lose work. We don't use advertising cookies.</p>
+      </S>
+      <S title="Site analytics">
+        <p>
+          We use Microsoft Clarity to see how people use Parchi, through clicks, scrolling and anonymised session recordings, so we can fix confusing
+          screens. Clarity sets its own cookies for this. Everything inside your account (invoices, customer details, products and business settings) is
+          hidden from these recordings, and typed text is masked. Microsoft's privacy statement explains how it handles this data:
+          privacy.microsoft.com/privacystatement.
+        </p>
       </S>
       <S title="Security">
         <p>

@@ -177,6 +177,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
       <div
         aria-live="polite"
+        data-clarity-mask="True"
         className="pointer-events-none fixed inset-x-0 bottom-[84px] z-50 flex flex-col items-center gap-2 px-4 md:bottom-6"
       >
         {toasts.map((t) => (
